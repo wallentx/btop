@@ -34,6 +34,10 @@ tab-size = 4
 #include <dlfcn.h>
 #include <unordered_map>
 #include <utility>
+#include <stdexcept>
+#include <sys/sysinfo.h> // Correctly placed include for sysinfo()
+
+extern "C" int sysinfo(struct sysinfo *info); // Explicit declaration
 
 #if defined(RSMI_STATIC)
 	#include <rocm_smi/rocm_smi.h>
@@ -886,11 +890,32 @@ namespace Cpu {
 		if (Config::getB("show_cpu_freq"))
 			cpuHz = get_cpuHz();
 
-		if (getloadavg(cpu.load_avg.data(), cpu.load_avg.size()) < 0) {
-			Logger::error("failed to get load averages");
-		}
+	        // Declare and open ifstream once
+                std::ifstream cread(Shared::procPath / "stat");
 
-		ifstream cread;
+                if (!cread.is_open()) {
+                    Logger::warning("/proc/stat is not accessible. Falling back to sysinfo().");
+
+                    // Use sysinfo() as a fallback
+                    struct sysinfo info;
+                    if (sysinfo(&info) != 0) {
+                        throw std::runtime_error("Failed to retrieve system load averages via sysinfo().");
+                    }
+
+                    // Convert load averages from fixed-point to floating-point
+                    cpu.load_avg[0] = info.loads[0] / 65536.0;
+                    cpu.load_avg[1] = info.loads[1] / 65536.0;
+                    cpu.load_avg[2] = info.loads[2] / 65536.0;
+
+                    Logger::warning("Load averages retrieved via sysinfo(): " +
+                                    std::to_string(cpu.load_avg[0]) + ", " +
+                                    std::to_string(cpu.load_avg[1]) + ", " +
+                                    std::to_string(cpu.load_avg[2]));
+
+                    // Provide default values for CPU percent
+                    cpu.cpu_percent["total"].push_back(0);
+                    return cpu;
+                }
 
 		try {
 			//? Get cpu total times for all cores from /proc/stat

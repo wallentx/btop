@@ -527,19 +527,22 @@ namespace Tools {
 		this->atom.store(false);
 	}
 
-	string readfile(const std::filesystem::path& path, const string& fallback) {
-		if (not fs::exists(path)) return fallback;
-		string out;
-		try {
-			std::ifstream file(path);
-			for (string readstr; getline(file, readstr); out += readstr);
-		}
-		catch (const std::exception& e) {
-			Logger::error("readfile() : Exception when reading " + string{path} + " : " + e.what());
-			return fallback;
-		}
-		return (out.empty() ? fallback : out);
-	}
+   // Read a complete file and return its contents as a string, or fallback if inaccessible
+   string readfile(const std::filesystem::path& path, const string& fallback) {
+       string out;
+       try {
+           if (not fs::exists(path))
+               return fallback;
+           std::ifstream file(path);
+           for (string readstr; getline(file, readstr); )
+               out += readstr;
+       }
+       catch (const std::exception& e) {
+           Logger::error("readfile() : Exception when reading " + path.string() + " : " + e.what());
+           return fallback;
+       }
+       return (out.empty() ? fallback : out);
+   }
 
 	auto celsius_to(const long long& celsius, const string& scale) -> tuple<long long, string> {
 		if (scale == "celsius")

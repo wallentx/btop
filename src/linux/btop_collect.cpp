@@ -365,11 +365,17 @@ namespace Cpu {
 				getline(cpuinfo, name);
 			}
 			else if (fs::exists("/sys/devices")) {
-				for (const auto& d : fs::directory_iterator("/sys/devices")) {
-					if (string(d.path().filename()).starts_with("arm")) {
-						name = d.path().filename();
-						break;
+				// Attempt to detect ARM device names; skip entries with permission issues
+				try {
+					for (const auto& d :
+					     fs::directory_iterator("/sys/devices", fs::directory_options::skip_permission_denied)) {
+						if (string(d.path().filename()).starts_with("arm")) {
+							name = d.path().filename();
+							break;
+						}
 					}
+				} catch (const fs::filesystem_error&) {
+					// ignore permission errors when scanning devices
 				}
 				if (not name.empty()) {
 					auto name_vec = ssplit(name, '_');
@@ -2759,14 +2765,18 @@ namespace Proc {
 			}
 
 			//? Get cpu total times from /proc/stat
-			cputimes = 0;
-			pread.open(Shared::procPath / "stat");
-			if (pread.good()) {
-				pread.ignore(SSmax, ' ');
-				for (uint64_t times; pread >> times; cputimes += times);
-			}
-			else throw std::runtime_error("Failure to read /proc/stat");
-			pread.close();
+           cputimes = 0;
+           pread.open(Shared::procPath / "stat");
+           if (pread.good()) {
+               pread.ignore(SSmax, ' ');
+               for (uint64_t times; pread >> times; cputimes += times);
+               pread.close();
+           } else {
+               Logger::warning("/proc/stat is not accessible. Skipping process CPU time collection.");
+               // Preserve previous value to avoid division by zero in CPU percentage calculation
+               cputimes = old_cputimes;
+               pread.close();
+           }
 
 			//? Iterate over all pids in /proc
 			for (const auto& d: fs::directory_iterator(Shared::procPath)) {
@@ -3055,6 +3065,7 @@ namespace Proc {
 
 namespace Tools {
 	double system_uptime() {
+		// Attempt to read uptime from /proc/uptime
 		string upstr;
 		ifstream pread(Shared::procPath / "uptime");
 		if (pread.good()) {
@@ -3066,6 +3077,11 @@ namespace Tools {
 			catch (const std::invalid_argument&) {}
 			catch (const std::out_of_range&) {}
 		}
-        throw std::runtime_error("Failed to get uptime from " + string{Shared::procPath} + "/uptime");
+		// Fallback to sysinfo() if reading from /proc failed
+		struct sysinfo info;
+		if (sysinfo(&info) == 0) {
+			return static_cast<double>(info.uptime);
+		}
+		throw std::runtime_error("Failed to get system uptime");
 	}
 }

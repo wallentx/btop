@@ -31,20 +31,18 @@ on:
 
 jobs:
   build-freebsd:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       matrix:
         compiler: ["clang++", "g++"]
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Compile
         uses: vmactions/freebsd-vm@v1
         with:
-          release: '14.0'
+          release: '14.3'
           usesh: true
           prepare: |
             pkg install -y gmake gcc coreutils git lowdown
@@ -56,8 +54,8 @@ jobs:
             mv bin/btop bin/btop-"$COMPILER"-"$GIT_HASH"
             ls -alh bin
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v4
         with:
-          name: btop-x86_64-freebsd-14
+          name: btop-x86_64-freebsd-14-${{ matrix.compiler }}
           path: 'bin/*'
           if-no-files-found: error

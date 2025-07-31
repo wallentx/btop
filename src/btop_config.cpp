@@ -18,7 +18,9 @@ tab-size = 4
 
 #include <array>
 #include <atomic>
+#include <filesystem>
 #include <fstream>
+#include <optional>
 #include <ranges>
 #include <string_view>
 #include <utility>
@@ -156,7 +158,7 @@ namespace Config {
 		{"custom_cpu_name", 	"#* Custom cpu model name, empty string to disable."},
 
 		{"disks_filter", 		"#* Optional filter for shown disks, should be full path of a mountpoint, separate multiple values with whitespace \" \".\n"
-								"#* Begin line with \"exclude=\" to change to exclude filter, otherwise defaults to \"most include\" filter. Example: disks_filter=\"exclude=/boot /home/user\"."},
+									"#* Only disks matching the filter will be shown. Prepend exclude= to only show disks not matching the filter. Examples: disk_filter=\"/boot /home/user\", disks_filter=\"exclude=/boot /home/user\""},
 
 		{"mem_graphs", 			"#* Show graphs instead of meters for memory values."},
 
@@ -196,6 +198,8 @@ namespace Config {
 		{"net_sync", 			"#* Sync the auto scaling for download and upload to whichever currently has the highest scale."},
 
 		{"net_iface", 			"#* Starts with the Network Interface specified here."},
+
+	    {"base_10_bitrate",     "#* \"True\" shows bitrates in base 10 (Kbps, Mbps). \"False\" shows bitrates in binary sizes (Kibps, Mibps, etc.). \"Auto\" uses base_10_sizes."},
 
 		{"show_battery", 		"#* Show battery stats in top right if battery is present."},
 
@@ -244,6 +248,7 @@ namespace Config {
 		{"disks_filter", ""},
 		{"io_graph_speeds", ""},
 		{"net_iface", ""},
+		{"base_10_bitrate", "Auto"},
 		{"log_level", "WARNING"},
 		{"proc_filter", ""},
 		{"proc_command", ""},
@@ -459,10 +464,18 @@ namespace Config {
 
 		for (const auto& box : ssplit(preset, ',')) {
 			const auto& vals = ssplit(box, ':');
-			if (vals.at(0) == "cpu") set("cpu_bottom", (vals.at(1) == "0" ? false : true));
-			else if (vals.at(0) == "mem") set("mem_below_net", (vals.at(1) == "0" ? false : true));
-			else if (vals.at(0) == "proc") set("proc_left", (vals.at(1) == "0" ? false : true));
-			set("graph_symbol_" + vals.at(0), vals.at(2));
+			if (vals.at(0) == "cpu") {
+				set("cpu_bottom", (vals.at(1) != "0"));
+			} else if (vals.at(0) == "mem") {
+				set("mem_below_net", (vals.at(1) != "0"));
+			} else if (vals.at(0) == "proc") {
+				set("proc_left", (vals.at(1) != "0"));
+			}
+			if (vals.at(0).starts_with("gpu")) {
+				set("graph_symbol_gpu", vals.at(2));
+			} else {
+				set("graph_symbol_" + vals.at(0), vals.at(2));
+			}
 		}
 
 		if (set_boxes(boxes)) {
@@ -585,12 +598,12 @@ namespace Config {
 	}
 
 	string getAsString(const std::string_view name) {
-		if (bools.contains(name))
-			return (bools.at(name) ? "True" : "False");
-		else if (ints.contains(name))
-			return to_string(ints.at(name));
-		else if (strings.contains(name))
-			return strings.at(name);
+		if (auto it = bools.find(name); it != bools.end())
+			return it->second ? "True" : "False";
+		if (auto it = ints.find(name); it != ints.end())
+			return to_string(it->second);
+		if (auto it = strings.find(name); it != strings.end())
+			return it->second;
 		return "";
 	}
 
@@ -694,7 +707,8 @@ namespace Config {
 		std::ifstream cread(conf_file);
 		if (cread.good()) {
 			vector<string> valid_names;
-			for (auto &n : descriptions)
+			valid_names.reserve(descriptions.size());
+			for (const auto &n : descriptions)
 				valid_names.push_back(n[0]);
 			if (string v_string; cread.peek() != '#' or (getline(cread, v_string, '\n') and not s_contains(v_string, Global::Version)))
 				write_new = true;
@@ -757,7 +771,7 @@ namespace Config {
 		std::ofstream cwrite(conf_file, std::ios::trunc);
 		if (cwrite.good()) {
 			cwrite << "#? Config file for btop v. " << Global::Version << "\n";
-			for (auto [name, description] : descriptions) {
+			for (const auto& [name, description] : descriptions) {
 				cwrite << "\n" << (description.empty() ? "" : description + "\n")
 						<< name << " = ";
 				if (strings.contains(name))
@@ -769,5 +783,39 @@ namespace Config {
 				cwrite << "\n";
 			}
 		}
+	}
+
+	static auto get_xdg_state_dir() -> std::optional<std::filesystem::path> {
+		std::optional<std::filesystem::path> xdg_state_home;
+
+		{
+			const auto xdg_state_home_ptr = std::getenv("XDG_STATE_HOME");
+			if (xdg_state_home_ptr != nullptr) {
+				xdg_state_home = std::make_optional(fs::path(xdg_state_home_ptr));
+			} else {
+				const auto home_ptr = std::getenv("HOME");
+				if (home_ptr != nullptr) {
+					xdg_state_home = std::make_optional(std::filesystem::path(home_ptr) / ".local" / "state");
+				}
+			}
+		}
+
+		if (xdg_state_home.has_value()) {
+			std::error_code err;
+			std::filesystem::create_directories(xdg_state_home.value(), err);
+			if (err) {
+				return std::nullopt;
+			}
+			return std::make_optional(xdg_state_home.value());
+		}
+		return std::nullopt;
+	}
+
+	auto get_log_file() -> std::optional<std::filesystem::path> {
+		auto xdg_state_home = get_xdg_state_dir();
+		if (xdg_state_home.has_value()) {
+			return std::make_optional(std::filesystem::path(xdg_state_home.value()) / "btop.log");
+		}
+		return std::nullopt;
 	}
 }

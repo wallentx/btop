@@ -149,7 +149,7 @@ The Linux version of btop++ is complete. Released as version 1.0.0
 
 I will be providing statically compiled binaries for a range of architectures in every release for those having problems compiling.
 
-For compilation GCC 10 is required, GCC 11 preferred.
+For compilation GCC 11 is required.
 
 Please report any bugs to the [Issues](https://github.com/aristocratos/btop/issues/new?assignees=aristocratos&labels=bug&template=bug_report.md&title=%5BBUG%5D) page.
 
@@ -186,8 +186,8 @@ C++ version and continuation of [bashtop](https://github.com/aristocratos/bashto
 ## Features
 
 * Easy to use, with a game inspired menu system.
-* Full mouse support, all buttons with a highlighted key is clickable and mouse scroll works in process list and menu boxes.
-* Fast and responsive UI with UP, DOWN keys process selection.
+* Full mouse support: all buttons with a highlighted key are clickable and mouse scrolling works in process list and menu boxes.
+* Fast and responsive UI with UP, DOWN key process selection.
 * Function for showing detailed stats for selected process.
 * Ability to filter processes.
 * Easy switching between sorting options.
@@ -203,33 +203,47 @@ C++ version and continuation of [bashtop](https://github.com/aristocratos/bashto
 
 ## Themes
 
-Btop++ uses the same theme files as bpytop and bashtop (some color values missing in bashtop themes) .
+Btop++ uses the same theme files as bpytop and bashtop (some color values missing in bashtop themes).
 
 See [themes](https://github.com/aristocratos/btop/tree/main/themes) folder for available themes.
 
+Btop searches the following directories for system themes:
+
+* `../share/btop/themes` (this path is relative to the btop executable)
+* `/usr/local/share/btop/themes`
+* `/usr/share/btop/themes`
+
+The first directory that exists and isn't empty is used as the system themes directory.
+
+The user themes directory depends on which environment variables are set:
+
+* If `$XDG_CONFIG_HOME` is set, the user themes directory is `$XDG_CONFIG_HOME/btop/themes`
+* Otherwise, if `$HOME` is set, the user themes directory is `$HOME/.config/btop/themes`
+* Otherwise, the user themes directory is `~/.config/btop/themes`
+
 The `make install` command places the default themes in `[$PREFIX or /usr/local]/share/btop/themes`.
-User created themes should be placed in `$XDG_CONFIG_HOME/btop/themes` or `$HOME/.config/btop/themes`.
+User created themes should be placed in the user themes directory.
 
 Let me know if you want to contribute with new themes.
 
 ## Support and funding
 
-You can sponsor this project through github, see [my sponsors page](https://github.com/sponsors/aristocratos) for options.
+You can sponsor this project through GitHub. See [my sponsors page](https://github.com/sponsors/aristocratos) for options.
 
-Or donate through [paypal](https://paypal.me/aristocratos) or [ko-fi](https://ko-fi.com/aristocratos).
+Or donate through [PayPal](https://paypal.me/aristocratos) or [ko-fi](https://ko-fi.com/aristocratos).
 
 Any support is greatly appreciated!
 
 ## Prerequisites
 
-For best experience, a terminal with support for:
+For the best experience run within a terminal with support for:
 
-* 24-bit truecolor ([See list of terminals with truecolor support](https://github.com//termstandard/colors))
+* 24-bit truecolor ([See list of terminals with truecolor support](https://github.com/termstandard/colors))
 * 256-color terminals are supported through 24-bit to 256-color conversion when setting "truecolor" to False in the options or with "-lc/--low-color" arguments.
-* 16 color TTY mode will be activated if a real tty device is detected. Can be forced with "-t/--tty_on" arguments.
+* 16 color TTY mode will be activated if a real tty device is detected. Can be forced with "-t/--tty" arguments.
 * Wide characters (Are sometimes problematic in web-based terminals)
 
-Also needs a UTF8 locale and a font that covers:
+Also necessary is a UTF8 locale and a font that includes:
 
 * Unicode Block “Braille Patterns” U+2800 - U+28FF (Not needed in TTY mode or with graphs set to type: block or tty.)
 * Unicode Block “Geometric Shapes” U+25A0 - U+25FF
@@ -263,15 +277,15 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 * If you are having problems with the characters in the graphs not looking like they do in the screenshots, it's likely a problem with your systems configured fallback font not having support for braille characters.
 
-* See [Terminess Powerline](https://github.com/ryanoasis/nerd-fonts/tree/master/patched-fonts/Terminus/terminus-ttf-4.40.1) for an example of a font that includes the braille symbols.
+* See [Terminess Powerline](https://github.com/ryanoasis/nerd-fonts/blob/master/patched-fonts/Terminus/TerminessNerdFontMono-Regular.ttf) for an example of a font that includes the braille symbols.
 
 * See comments by @sgleizes [link](https://github.com/aristocratos/bpytop/issues/100#issuecomment-684036827) and @XenHat [link](https://github.com/aristocratos/bpytop/issues/100#issuecomment-691585587) in issue #100 for possible solutions.
 
-* If text are misaligned and you are using Konsole or Yakuake, turning off "Bi-Directional text rendering" is a possible fix.
+* If text is misaligned and you use Konsole or Yakuake, turning off "Bi-Directional text rendering" is a possible fix.
 
-* Characters clipping in to each other or text/border misalignments is not bugs caused by btop, but most likely a fontconfig or terminal problem where the braille characters making up the graphs aren't rendered correctly.
+* Characters clipping into each other or text/border misalignments are not bugs caused by btop, but most likely a fontconfig or terminal problem where the braille characters making up the graphs aren't rendered correctly.
 
-* Look to the creators of the terminal emulator you use to fix these issues if the previous mentioned fixes don't work for you.
+* Look to the creators of the terminal emulator you use to fix these issues if the previously mentioned fixes don't work for you.
 
 ## Screenshots
 
@@ -301,7 +315,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 ## Installation
 
-**Binaries for Linux are statically compiled with musl and works on kernel 2.6.39 and newer**
+**Binaries for Linux are statically compiled with musl and work on kernel releases 2.6.39 and newer**
 
 1. **Download btop-(VERSION)-(ARCH)-(PLATFORM).tbz from [latest release](https://github.com/aristocratos/btop/releases/latest) and unpack to a new folder**
 
@@ -363,7 +377,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
     ```bash
     sudo dnf install btop
 	```
-* **RHEL/AlmaLinux 8+**
+* **RHEL/Rocky/AlmaLinux 8+**
     ```bash
     sudo dnf install epel-release
 	sudo dnf install btop
@@ -387,9 +401,9 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 ## Compilation Linux
 
-   Requires at least GCC 10 or Clang 16.
+   Requires at least GCC 11 or Clang 16.
 
-   The makefile also needs GNU coreutils and `sed` (should already be installed on any modern distribution).
+   The Makefile also needs GNU `coreutils` and `sed` (should already be installed on any modern distribution).
 
    ### GPU compatibility
 
@@ -452,7 +466,6 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | `STRIP=true`                    | To force stripping of debug symbols (adds `-s` linker flag)             |
    | `DEBUG=true`                    | Sets OPTFLAGS to `-O0 -g` and enables more verbose debug logging        |
    | `ARCH=<architecture>`           | To manually set the target architecture                                 |
-   | `FORTIFY_SOURCE=false`          | Disable fortification with `_FORTIFY_SOURCE=3`                          |
    | `GPU_SUPPORT=<true\|false>`     | Enable/disable GPU support (Enabled by default on X86_64 Linux)         |
    | `RSMI_STATIC=true`              | To statically link the ROCm SMI library used for querying AMDGPU        |
    | `ADDFLAGS=<flags>`              | For appending flags to both compiler and linker                         |
@@ -556,10 +569,8 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    |---------------------------------|-------------------------------------------------------------------------|
    | `-DBTOP_STATIC=<ON\|OFF>`       | Enables static linking (OFF by default)                                 |
    | `-DBTOP_LTO=<ON\|OFF>`          | Enables link time optimization (ON by default)                          |
-   | `-DBTOP_USE_MOLD=<ON\|OFF>`     | Use mold to link btop (OFF by default)                                  |
-   | `-DBTOP_PEDANTIC=<ON\|OFF>`     | Compile with additional warnings (OFF by default)                       |
-   | `-DBTOP_WERROR=<ON\|OFF>`       | Compile with warnings as errors (OFF by default)                        |
-   | `-DBTOP_FORTIFY=<ON\|OFF>`      | Detect buffer overflows with `_FORTIFY_SOURCE=3` (ON by default)        |
+
+
    | `-DBTOP_GPU=<ON\|OFF>`          | Enable GPU support (ON by default)                                      |
    | `-DBTOP_RSMI_STATIC=<ON\|OFF>`  | Build and link the ROCm SMI library statically (OFF by default)         |
    | `-DCMAKE_INSTALL_PREFIX=<path>` | The installation prefix ('/usr/local' by default)                       |
@@ -591,11 +602,11 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 ## Compilation macOS OSX
 
-   Requires at least GCC 10 or Clang 16.
+   Requires at least GCC 12 or Clang 16.
 
    With GCC, version 12 (or better) is needed for macOS Ventura. If you get linker errors on Ventura you'll need to upgrade your command line tools (Version 14.0) is bugged.
 
-   The makefile also needs GNU coreutils and `sed`.
+   The Makefile also needs GNU coreutils and `sed`.
 
    Install and use Homebrew or MacPorts package managers for easy dependency installation
 
@@ -633,7 +644,6 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | `STRIP=true`                    | To force stripping of debug symbols (adds `-s` linker flag)             |
    | `DEBUG=true`                    | Sets OPTFLAGS to `-O0 -g` and enables more verbose debug logging        |
    | `ARCH=<architecture>`           | To manually set the target architecture                                 |
-   | `FORTIFY_SOURCE=false`          | Disable fortification with `_FORTIFY_SOURCE=3`                          |
    | `ADDFLAGS=<flags>`              | For appending flags to both compiler and linker                         |
    | `CXX=<compiler>`                | Manually set which compiler to use                                       |
 
@@ -729,10 +739,8 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | Configure flag                  | Description                                                             |
    |---------------------------------|-------------------------------------------------------------------------|
    | `-DBTOP_LTO=<ON\|OFF>`          | Enables link time optimization (ON by default)                          |
-   | `-DBTOP_USE_MOLD=<ON\|OFF>`     | Use mold to link btop (OFF by default)                                  |
-   | `-DBTOP_PEDANTIC=<ON\|OFF>`     | Compile with additional warnings (OFF by default)                       |
-   | `-DBTOP_WERROR=<ON\|OFF>`       | Compile with warnings as errors (OFF by default)                        |
-   | `-DBTOP_FORTIFY=<ON\|OFF>`      | Detect buffer overflows with `_FORTIFY_SOURCE=3` (ON by default)        |
+
+
    | `-DCMAKE_INSTALL_PREFIX=<path>` | The installation prefix ('/usr/local' by default)                       |
 
    To force any specific compiler, run `CXX=<compiler> cmake -B build -G Ninja`
@@ -762,7 +770,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 ## Compilation FreeBSD
 
-   Requires at least GCC 10 or Clang 16.
+   Requires at least GCC 11 or Clang 16.
 
    Note that GNU make (`gmake`) is required to compile on FreeBSD.
 
@@ -801,7 +809,6 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | `STRIP=true`                    | To force stripping of debug symbols (adds `-s` linker flag)             |
    | `DEBUG=true`                    | Sets OPTFLAGS to `-O0 -g` and enables more verbose debug logging        |
    | `ARCH=<architecture>`           | To manually set the target architecture                                 |
-   | `FORTIFY_SOURCE=false`          | Disable fortification with `_FORTIFY_SOURCE=3`                          |
    | `ADDFLAGS=<flags>`              | For appending flags to both compiler and linker                         |
    | `CXX=<compiler>`                | Manually set which compiler to use                                       |
 
@@ -908,10 +915,8 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    |---------------------------------|-------------------------------------------------------------------------|
    | `-DBTOP_STATIC=<ON\|OFF>`       | Enables static linking (OFF by default)                                 |
    | `-DBTOP_LTO=<ON\|OFF>`          | Enables link time optimization (ON by default)                          |
-   | `-DBTOP_USE_MOLD=<ON\|OFF>`     | Use mold to link btop (OFF by default)                                  |
-   | `-DBTOP_PEDANTIC=<ON\|OFF>`     | Compile with additional warnings (OFF by default)                       |
-   | `-DBTOP_WERROR=<ON\|OFF>`       | Compile with warnings as errors (OFF by default)                        |
-   | `-DBTOP_FORTIFY=<ON\|OFF>`      | Detect buffer overflows with `_FORTIFY_SOURCE=3` (ON by default)        |
+
+
    | `-DCMAKE_INSTALL_PREFIX=<path>` | The installation prefix ('/usr/local' by default)                       |
 
    _**Note:** Static linking does not work with GCC._
@@ -943,7 +948,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 ## Compilation NetBSD
 
-   Requires at least GCC 10.
+   Requires at least GCC 11.
 
    Note that GNU make (`gmake`) is required to compile on NetBSD.
 
@@ -956,7 +961,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 1. **Install dependencies**
 
    ```bash
-   pkg_add gmake gcc10 coreutils git
+   pkg_add gmake gcc11 coreutils git
    ```
 
 2. **Clone repository**
@@ -982,7 +987,6 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | `STRIP=true`                    | To force stripping of debug symbols (adds `-s` linker flag)             |
    | `DEBUG=true`                    | Sets OPTFLAGS to `-O0 -g` and enables more verbose debug logging        |
    | `ARCH=<architecture>`           | To manually set the target architecture                                 |
-   | `FORTIFY_SOURCE=false`          | Disable fortification with `_FORTIFY_SOURCE=3`                          |
    | `ADDFLAGS=<flags>`              | For appending flags to both compiler and linker                         |
    | `CXX=<compiler>`                | Manually set which compiler to use                                      |
 
@@ -1046,7 +1050,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    Requires GCC, CMake, Ninja and Git
 
    ```bash
-   pkg_add cmake ninja-build gcc10 coreutils git
+   pkg_add cmake ninja-build gcc11 coreutils git
    ```
 
 2. **Clone the repository**
@@ -1059,7 +1063,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
    ```bash
    # Configure
-   cmake -DCMAKE_CXX_COMPILER="/usr/pkg/gcc10/bin/g++" -B build -G Ninja
+   cmake -DCMAKE_CXX_COMPILER="/usr/pkg/gcc11/bin/g++" -B build -G Ninja
    # Build
    cmake --build build
    ```
@@ -1071,10 +1075,8 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | Configure flag                  | Description                                                             |
    |---------------------------------|-------------------------------------------------------------------------|
    | `-DBTOP_LTO=<ON\|OFF>`          | Enables link time optimization (ON by default)                          |
-   | `-DBTOP_USE_MOLD=<ON\|OFF>`     | Use mold to link btop (OFF by default)                                  |
-   | `-DBTOP_PEDANTIC=<ON\|OFF>`     | Compile with additional warnings (OFF by default)                       |
-   | `-DBTOP_WERROR=<ON\|OFF>`       | Compile with warnings as errors (OFF by default)                        |
-   | `-DBTOP_FORTIFY=<ON\|OFF>`      | Detect buffer overflows with `_FORTIFY_SOURCE=3` (ON by default)        |
+
+
    | `-DCMAKE_INSTALL_PREFIX=<path>` | The installation prefix ('/usr/local' by default)                       |
 
    To force any other compiler, run `CXX=<compiler> cmake -B build -G Ninja`
@@ -1104,7 +1106,7 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
 
 ## Compilation OpenBSD
 
-   Requires at least GCC 10.
+   Requires at least GCC 11.
 
    Note that GNU make (`gmake`) is required to compile on OpenBSD.
 
@@ -1143,7 +1145,6 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | `STRIP=true`                    | To force stripping of debug symbols (adds `-s` linker flag)             |
    | `DEBUG=true`                    | Sets OPTFLAGS to `-O0 -g` and enables more verbose debug logging        |
    | `ARCH=<architecture>`           | To manually set the target architecture                                 |
-   | `FORTIFY_SOURCE=false`          | Disable fortification with `_FORTIFY_SOURCE=3`                          |
    | `ADDFLAGS=<flags>`              | For appending flags to both compiler and linker                         |
    | `CXX=<compiler>`                | Manually set which compiler to use                                       |
 
@@ -1234,10 +1235,8 @@ Can be set with `make setcap` (preferred) or `make setuid` or by running btop wi
    | Configure flag                  | Description                                                             |
    |---------------------------------|-------------------------------------------------------------------------|
    | `-DBTOP_LTO=<ON\|OFF>`          | Enables link time optimization (ON by default)                          |
-   | `-DBTOP_USE_MOLD=<ON\|OFF>`     | Use mold to link btop (OFF by default)                                  |
-   | `-DBTOP_PEDANTIC=<ON\|OFF>`     | Compile with additional warnings (OFF by default)                       |
-   | `-DBTOP_WERROR=<ON\|OFF>`       | Compile with warnings as errors (OFF by default)                        |
-   | `-DBTOP_FORTIFY=<ON\|OFF>`      | Detect buffer overflows with `_FORTIFY_SOURCE=3` (ON by default)        |
+
+
    | `-DCMAKE_INSTALL_PREFIX=<path>` | The installation prefix ('/usr/local' by default)                       |
 
    To force any other compiler, run `CXX=<compiler> cmake -B build -G Ninja`
@@ -1355,8 +1354,8 @@ shown_boxes = "proc cpu mem net"
 #* Update time in milliseconds, recommended 2000 ms or above for better sample times for graphs.
 update_ms = 1500
 
-#* Processes sorting, "pid" "program" "arguments" "threads" "user" "memory" "cpu lazy" "cpu responsive",
-#* "cpu lazy" sorts top process over time (easier to follow), "cpu responsive" updates top process directly.
+#* Processes sorting, "pid" "program" "arguments" "threads" "user" "memory" "cpu lazy" "cpu direct",
+#* "cpu lazy" sorts top process over time (easier to follow), "cpu direct" updates top process directly.
 proc_sorting = "cpu lazy"
 
 #* Reverse sorting order, True or False.
@@ -1509,18 +1508,20 @@ log_level = "DEBUG"
 #### Command line options
 
 ```text
-usage: btop [-h] [-v] [-/+t] [-p <id>] [--utf-force] [--debug]
+Usage: btop [OPTIONS]
 
-optional arguments:
-  -h, --help            show this help message and exit
-  -v, --version         show version info and exit
-  -lc, --low-color      disable truecolor, converts 24-bit colors to 256-color
-  -t, --tty_on          force (ON) tty mode, max 16 colors and tty friendly graph symbols
-  +t, --tty_off         force (OFF) tty mode
-  -p, --preset <id>     start with preset, integer value between 0-9
-  --utf-force           force start even if no UTF-8 locale was detected
-  --debug               start in DEBUG mode: shows microsecond timer for information collect
-                        and screen draw functions and sets loglevel to DEBUG
+Options:
+  -c, --config <file>     Path to a config file
+  -d, --debug             Start in debug mode with additional logs and metrics
+  -f, --filter <filter>   Set an initial process filter
+      --force-utf         Override automatic UTF locale detection
+  -l, --low-color         Disable true color, 256 colors only
+  -p, --preset <id>       Start with a preset (0-9)
+  -t, --tty               Force tty mode with ANSI graph symbols and 16 colors only
+      --no-tty            Force disable tty mode
+  -u, --update <ms>       Set an initial update rate in milliseconds
+  -h, --help              Show this help message and exit
+  -V, --version           Show a version message and exit (more with --version)
 ```
 
 ## LICENSE

@@ -32,7 +32,6 @@ tab-size = 4
 #include <filesystem>
 #include <future>
 #include <dlfcn.h>
-#include <unordered_map>
 #include <utility>
 #include <stdexcept>
 #include <sys/sysinfo.h> // Correctly placed include for sysinfo()
@@ -59,6 +58,7 @@ extern "C" {
 	#undef class
 #endif
 
+using std::abs;
 using std::clamp;
 using std::cmp_greater;
 using std::cmp_less;
@@ -103,9 +103,7 @@ namespace Cpu {
 
 	struct Sensor {
 		fs::path path;
-		string label;
 		int64_t temp{};
-		int64_t high{};
 		int64_t crit{};
 	};
 
@@ -157,6 +155,8 @@ namespace Gpu {
 		nvmlReturn_t (*nvmlDeviceGetTemperature)(nvmlDevice_t, nvmlTemperatureSensors_t, unsigned int*);
 		nvmlReturn_t (*nvmlDeviceGetMemoryInfo)(nvmlDevice_t, nvmlMemory_t*);
 		nvmlReturn_t (*nvmlDeviceGetPcieThroughput)(nvmlDevice_t, nvmlPcieUtilCounter_t, unsigned int*);
+		nvmlReturn_t (*nvmlDeviceGetEncoderUtilization)(nvmlDevice_t, unsigned int*, unsigned int*);
+		nvmlReturn_t (*nvmlDeviceGetDecoderUtilization)(nvmlDevice_t, unsigned int*, unsigned int*);
 
 		//? Data
 		void* nvml_dl_handle;
@@ -314,6 +314,7 @@ namespace Shared {
 			for (size_t i = 0; i < gpu_b_height_offsets.size(); ++i)
 				gpu_b_height_offsets[i] = gpus[i].supported_functions.gpu_utilization
 					   + gpus[i].supported_functions.pwr_usage
+					   + (gpus[i].supported_functions.encoder_utilization or gpus[i].supported_functions.decoder_utilization)
 					   + (gpus[i].supported_functions.mem_total or gpus[i].supported_functions.mem_used)
 						* (1 + 2*(gpus[i].supported_functions.mem_total and gpus[i].supported_functions.mem_used) + 2*gpus[i].supported_functions.mem_utilization);
 		}
@@ -385,42 +386,7 @@ namespace Cpu {
 
 			}
 
-			auto name_vec = ssplit(name, ' ');
-
-			if ((s_contains(name, "Xeon"s) or v_contains(name_vec, "Duo"s)) and v_contains(name_vec, "CPU"s)) {
-				auto cpu_pos = v_index(name_vec, "CPU"s);
-				if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')'))
-					name = name_vec.at(cpu_pos + 1);
-				else
-					name.clear();
-			}
-			else if (v_contains(name_vec, "Ryzen"s)) {
-				auto ryz_pos = v_index(name_vec, "Ryzen"s);
-				name = "Ryzen"	+ (ryz_pos < name_vec.size() - 1 ? ' ' + name_vec.at(ryz_pos + 1) : "")
-								+ (ryz_pos < name_vec.size() - 2 ? ' ' + name_vec.at(ryz_pos + 2) : "");
-			}
-			else if (s_contains(name, "Intel"s) and v_contains(name_vec, "CPU"s)) {
-				auto cpu_pos = v_index(name_vec, "CPU"s);
-				if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')') and name_vec.at(cpu_pos + 1).size() != 1)
-					name = name_vec.at(cpu_pos + 1);
-				else
-					name.clear();
-			}
-			else
-				name.clear();
-
-			if (name.empty() and not name_vec.empty()) {
-				for (const auto& n : name_vec) {
-					if (n == "@") break;
-					name += n + ' ';
-				}
-				name.pop_back();
-				for (const auto& replace : {"Processor", "CPU", "(R)", "(TM)", "Intel", "AMD", "Core"}) {
-					name = s_replace(name, replace, "");
-					name = s_replace(name, "  ", " ");
-				}
-				name = trim(name);
-			}
+			name = trim_name(name);
 		}
 
 		return name;
@@ -436,11 +402,11 @@ namespace Cpu {
 					fs::path add_path = fs::canonical(dir.path());
 					if (v_contains(search_paths, add_path) or v_contains(search_paths, add_path / "device")) continue;
 
-					if (s_contains(add_path, "coretemp"))
+					if (s_contains(add_path.c_str(), "coretemp"))
 						got_coretemp = true;
 
 					for (const auto & file : fs::directory_iterator(add_path)) {
-						if (string(file.path().filename()) == "device") {
+						if (file.path().filename() == "device") {
 							for (const auto & dev_file : fs::directory_iterator(file.path())) {
 								string dev_filename = dev_file.path().filename();
 								if (dev_filename.starts_with("temp") and dev_filename.ends_with("_input")) {
@@ -489,12 +455,11 @@ namespace Cpu {
 						const string label = readfile(fs::path(basepath + "label"), "temp" + to_string(file_id));
 						const string sensor_name = pname + "/" + label;
 						const int64_t temp = stol(readfile(fs::path(basepath + "input"), "0")) / 1000;
-						const int64_t high = stol(readfile(fs::path(basepath + "max"), "80000")) / 1000;
 						const int64_t crit = stol(readfile(fs::path(basepath + "crit"), "95000")) / 1000;
 
-						found_sensors[sensor_name] = {fs::path(basepath + "input"), label, temp, high, crit};
+						found_sensors[sensor_name] = Sensor { fs::path(basepath + "input"), temp, crit };
 
-						if (not got_cpu and (label.starts_with("Package id") or label.starts_with("Tdie"))) {
+						if (not got_cpu and (label.starts_with("Package id") or label.starts_with("Tdie") or label.starts_with("SoC Temperature"))) {
 							got_cpu = true;
 							cpu_sensor = sensor_name;
 						}
@@ -515,7 +480,8 @@ namespace Cpu {
 					const string sensor_name = "thermal" + to_string(i) + "/" + label;
 					const int64_t temp = stol(readfile(basepath / "temp", "0")) / 1000;
 
-					int64_t high, crit;
+					int64_t high = 0;
+					int64_t crit = 0;
 					for (int ii = 0; fs::exists(basepath / string("trip_point_" + to_string(ii) + "_temp")); ii++) {
 						const string trip_type = readfile(basepath / string("trip_point_" + to_string(ii) + "_type"));
 						if (not is_in(trip_type, "high", "critical")) continue;
@@ -525,7 +491,7 @@ namespace Cpu {
 					if (high < 1) high = 80;
 					if (crit < 1) crit = 95;
 
-					found_sensors[sensor_name] = {basepath / "temp", label, temp, high, crit};
+					found_sensors[sensor_name] = Sensor { basepath / "temp", temp, crit };
 				}
 			}
 
@@ -558,7 +524,7 @@ namespace Cpu {
 		return not found_sensors.empty();
 	}
 
-	void update_sensors() {
+	static void update_sensors() {
 		if (cpu_sensor.empty()) return;
 
 		const auto& cpu_sensor = (not Config::getS("cpu_sensor").empty() and found_sensors.contains(Config::getS("cpu_sensor")) ? Config::getS("cpu_sensor") : Cpu::cpu_sensor);
@@ -569,8 +535,7 @@ namespace Cpu {
 		if (current_cpu.temp.at(0).size() > 20) current_cpu.temp.at(0).pop_front();
 
 		if (Config::getB("show_coretemp") and not cpu_temp_only) {
-			vector<string> done;
-			for (const auto& sensor : core_sensors) {
+			for (vector<string_view> done; const auto& sensor : core_sensors) {
 				if (v_contains(done, sensor)) continue;
 				found_sensors.at(sensor).temp = stol(readfile(found_sensors.at(sensor).path, "0")) / 1000;
 				done.push_back(sensor);
@@ -617,16 +582,24 @@ namespace Cpu {
 				}
 			}
 
-			if (hz <= 1 or hz >= 1000000)
+			if (hz <= 1 or hz >= 999999999)
 				throw std::runtime_error("Failed to read /sys/devices/system/cpu/cpufreq/policy and /proc/cpuinfo.");
 
-			if (hz >= 1000) {
-				if (hz >= 10000) cpuhz = to_string((int)round(hz / 1000)); // Future proof until we reach THz speeds :)
-				else cpuhz = to_string(round(hz / 100) / 10.0).substr(0, 3);
+			if (hz > 999999) {
+				cpuhz = fmt::format("{:.1f}", hz / 1'000'000);
+				cpuhz.resize(3);
+				if (cpuhz.back() == '.') cpuhz.pop_back();
+				cpuhz += " THz";
+			}
+			else if (hz > 999) {
+				cpuhz = fmt::format("{:.1f}", hz / 1'000);
+				cpuhz.resize(3);
+				if (cpuhz.back() == '.') cpuhz.pop_back();
 				cpuhz += " GHz";
 			}
-			else if (hz > 0)
-				cpuhz = to_string((int)hz) + " MHz";
+			else {
+				cpuhz = fmt::format("{:.0f} MHz", hz);
+			}
 
 		}
 		catch (const std::exception& e) {
@@ -844,14 +817,14 @@ namespace Cpu {
 			if (b.use_energy_or_charge ) {
 				if (not b.power_now.empty()) {
 					try {
-						seconds = round((double)stoll(readfile(b.energy_now, "0")) / stoll(readfile(b.power_now, "1")) * 3600);
+						seconds = abs(round((double)stoll(readfile(b.energy_now, "0")) / stoll(readfile(b.power_now, "1")) * 3600));
 					}
 					catch (const std::invalid_argument&) { }
 					catch (const std::out_of_range&) { }
 				}
 				else if (not b.current_now.empty()) {
 					try {
-						seconds = round((double)stoll(readfile(b.charge_now, "0")) / (double)stoll(readfile(b.current_now, "1")) * 3600);
+						seconds = abs(round((double)stoll(readfile(b.charge_now, "0")) / (double)stoll(readfile(b.current_now, "1")) * 3600));
 					}
 					catch (const std::invalid_argument&) { }
 					catch (const std::out_of_range&) { }
@@ -865,7 +838,28 @@ namespace Cpu {
 				catch (const std::invalid_argument&) { }
 				catch (const std::out_of_range&) { }
 			}
-		}
+		} 
+		//? Or get seconds to full
+		else if(is_in(status, "charging")) {
+			if (b.use_energy_or_charge ) {
+				if (not b.power_now.empty()) {
+					try {
+						seconds = (round((double)stoll(readfile(b.energy_full , "0")) - round((double)stoll(readfile(b.energy_now, "0"))))  
+									/ abs((double)stoll(readfile(b.power_now, "1"))) * 3600);
+					}
+					catch (const std::invalid_argument&) { }
+					catch (const std::out_of_range&) { }
+				}
+				else if (not b.current_now.empty()) {
+					try {
+						seconds = (round((double)stoll(readfile(b.charge_full , "0")) - (double)stoll(readfile(b.charge_now, "0")))  
+									/ std::abs((double)stoll(readfile(b.current_now, "1"))) * 3600);
+					}
+					catch (const std::invalid_argument&) { }
+					catch (const std::out_of_range&) { }
+				}
+			}
+		} 
 
 		//? Get power draw
 		if (b.use_power) {
@@ -1013,8 +1007,8 @@ namespace Cpu {
 							core_old_idles.push_back(0);
 							cpu.core_percent.emplace_back();
 						}
-						const long long calc_totals = max(0ll, totals - core_old_totals.at(i-1));
-						const long long calc_idles = max(0ll, idles - core_old_idles.at(i-1));
+						const long long calc_totals = max(1ll, totals - core_old_totals.at(i-1));
+						const long long calc_idles = max(1ll, idles - core_old_idles.at(i-1));
 						core_old_totals.at(i-1) = totals;
 						core_old_idles.at(i-1) = idles;
 
@@ -1102,6 +1096,8 @@ namespace Gpu {
 		    LOAD_SYM(nvmlDeviceGetTemperature);
 		    LOAD_SYM(nvmlDeviceGetMemoryInfo);
 		    LOAD_SYM(nvmlDeviceGetPcieThroughput);
+			LOAD_SYM(nvmlDeviceGetEncoderUtilization);
+			LOAD_SYM(nvmlDeviceGetDecoderUtilization);
 
             #undef LOAD_SYM
 
@@ -1157,7 +1153,7 @@ namespace Gpu {
     				result = nvmlDeviceGetHandleByIndex(i, devices.data() + i);
         			if (result != NVML_SUCCESS) {
     					Logger::warning(std::string("NVML: Failed to get device handle: ") + nvmlErrorString(result));
-    					gpus[i].supported_functions = {false, false, false, false, false, false, false, false};
+						gpus[i].supported_functions = {false, false, false, false, false, false, false, false, false, false};
     					continue;
         			}
 
@@ -1302,6 +1298,30 @@ namespace Gpu {
 						auto used_percent = (long long)round((double)memory.used * 100.0 / (double)memory.total);
 						gpus_slice[i].gpu_percent.at("gpu-vram-totals").push_back(used_percent);
 					}
+				}
+
+				// nvTimer.stop_rename_reset("Nv enc");
+				//? Encoder info
+				if (gpus_slice[i].supported_functions.encoder_utilization) {
+					unsigned int utilization;
+					unsigned int samplingPeriodUs;
+					result = nvmlDeviceGetEncoderUtilization(devices[i], &utilization, &samplingPeriodUs);
+					if (result != NVML_SUCCESS) {
+						Logger::warning(std::string("NVML: Failed to get encoder utilization: ") + nvmlErrorString(result));
+						if constexpr(is_init) gpus_slice[i].supported_functions.encoder_utilization = false;
+					} else gpus_slice[i].encoder_utilization = (long long)utilization;
+				}
+
+				// nvTimer.stop_rename_reset("Nv dec");
+				//? Decoder info
+				if (gpus_slice[i].supported_functions.decoder_utilization) {
+					unsigned int utilization;
+					unsigned int samplingPeriodUs;
+					result = nvmlDeviceGetDecoderUtilization(devices[i], &utilization, &samplingPeriodUs);
+					if (result != NVML_SUCCESS) {
+						Logger::warning(std::string("NVML: Failed to get decoder utilization: ") + nvmlErrorString(result));
+						if constexpr(is_init) gpus_slice[i].supported_functions.decoder_utilization = false;
+					} else gpus_slice[i].decoder_utilization = (long long)utilization;
 				}
 
     			//? TODO: Processes using GPU
@@ -1477,6 +1497,10 @@ namespace Gpu {
         			if (result != RSMI_STATUS_SUCCESS)
     					Logger::warning("ROCm SMI: Failed to get maximum GPU temperature, defaulting to 110°C");
     				else gpus_slice[i].temp_max = (long long)temp_max;
+
+					//? Disable encoder and decoder utilisation on AMD
+					gpus_slice[i].supported_functions.encoder_utilization = false;
+					gpus_slice[i].supported_functions.decoder_utilization = false;
     			}
 
 				//? GPU utilization
@@ -1613,7 +1637,7 @@ namespace Gpu {
 				//? PCIe link speeds
 				if (gpus_slice[i].supported_functions.pcie_txrx and Config::getB("rsmi_measure_pcie_speeds")) {
 					uint64_t tx, rx;
-					result = rsmi_dev_pci_throughput_get(i, &tx, &rx, 0);
+					result = rsmi_dev_pci_throughput_get(i, &tx, &rx, nullptr);
     				if (result != RSMI_STATUS_SUCCESS) {
 						Logger::warning("ROCm SMI: Failed to get PCIe throughput");
 						if constexpr(is_init) gpus_slice[i].supported_functions.pcie_txrx = false;
@@ -1708,7 +1732,9 @@ namespace Gpu {
 					.temp_info = false,
 					.mem_total = false,
 					.mem_used = false,
-					.pcie_txrx = false
+					.pcie_txrx = false,
+					.encoder_utilization = false,
+					.decoder_utilization = false
 				};
 
 				gpus_slice->pwr_max_usage = 10'000; //? 10W
@@ -1800,6 +1826,36 @@ namespace Gpu {
 }
 #endif
 
+/// Convert ascii escapes like \040 into chars.
+static auto convert_ascii_escapes(const std::string& input) -> std::string {
+    std::string out;
+    out.reserve(input.size());
+
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        if (input[i] == '\\' &&
+	    	// Peek the next three characters.
+            i + 3 < input.size() &&
+            std::isdigit(input[i + 1]) &&
+            std::isdigit(input[i + 2]) &&
+            std::isdigit(input[i + 3])) {
+
+			// Convert octal chars to decimal int.
+			//   '0' - '0' -> 0, '4' - '0' -> 4, '0' - '0' -> 0.
+			//   0 * 64 (0)
+			//   + 4 * 8 (32)
+			//   + 0
+			//   = 32 (ascii space)
+            int value = ((input[i + 1] - '0') * 64) + ((input[i + 2] - '0') * 8) + (input[i + 3] - '0');
+            out.push_back(static_cast<char>(value));
+            // Consume the three digits.
+            i += 3;
+        } else {
+            out.push_back(input[i]);
+        }
+    }
+    return out;
+}
+
 namespace Mem {
 	bool has_swap{};
 	vector<string> fstab;
@@ -1817,7 +1873,7 @@ namespace Mem {
 
 	uint64_t get_totalMem() {
 		ifstream meminfo(Shared::procPath / "meminfo");
-		int64_t totalMem;
+		int64_t totalMem = 0;
 		if (meminfo.good()) {
 			meminfo.ignore(SSmax, ':');
 			meminfo >> totalMem;
@@ -1996,6 +2052,9 @@ namespace Mem {
 						diskread >> dev >> mountpoint >> fstype;
 						diskread.ignore(SSmax, '\n');
 
+						// A mountpoint can ascii escape codes, which will not work with `statvfs`.
+						mountpoint = convert_ascii_escapes(mountpoint);
+
 						if (v_contains(ignore_list, mountpoint) or v_contains(found, mountpoint)) continue;
 
 						//? Match filter if not empty
@@ -2099,7 +2158,7 @@ namespace Mem {
 						disk.used_percent = updated_stats.used_percent;
 						disk.free_percent = updated_stats.free_percent;
 					}
-					disks_stats_promises[mountpoint] = async(std::launch::async, [mountpoint, &free_priv]() -> pair<disk_info, int> {
+					disks_stats_promises[mountpoint] = async(std::launch::async, [mountpoint, free_priv]() -> pair<disk_info, int> {
 						struct statvfs vfs;
 						disk_info disk;
 						if (statvfs(mountpoint.c_str(), &vfs) < 0) {
@@ -2215,7 +2274,7 @@ namespace Mem {
 
 							for (int i = 0; i < 2; i++) { diskread >> std::ws; diskread.ignore(SSmax, ' '); }
 							diskread >> io_ticks;
-							if (disk.io_activity.empty())
+							if (uptime == old_uptime || disk.io_activity.empty())
 								disk.io_activity.push_back(0);
 							else
 								disk.io_activity.push_back(clamp((long)round((double)(io_ticks - disk.old_io.at(2)) / (uptime - old_uptime) / 10), 0l, 100l));
@@ -2451,13 +2510,14 @@ namespace Net {
 
 			//? Get total received and transmitted bytes + device address if no ip was found
 			for (const auto& iface : interfaces) {
-				if (net.at(iface).ipv4.empty() and net.at(iface).ipv6.empty())
-					net.at(iface).ipv4 = readfile("/sys/class/net/" + iface + "/address");
+				auto& netif = net.at(iface);
+				if (netif.ipv4.empty() and netif.ipv6.empty())
+					netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
 
 				for (const string dir : {"download", "upload"}) {
 					const fs::path sys_file = "/sys/class/net/" + iface + "/statistics/" + (dir == "download" ? "rx_bytes" : "tx_bytes");
-					auto& saved_stat = net.at(iface).stat.at(dir);
-					auto& bandwidth = net.at(iface).bandwidth.at(dir);
+					auto& saved_stat = netif.stat.at(dir);
+					auto& bandwidth = netif.bandwidth.at(dir);
 
 					uint64_t val{};
 					try { val = (uint64_t)stoull(readfile(sys_file, "0")); }
@@ -2485,7 +2545,7 @@ namespace Net {
 
 					//? Set counters for auto scaling
 					if (net_auto and selected_iface == iface) {
-						if (net_sync and saved_stat.speed < net.at(iface).stat.at(dir == "download" ? "upload" : "download").speed) continue;
+						if (net_sync and saved_stat.speed < netif.stat.at(dir == "download" ? "upload" : "download").speed) continue;
 						if (saved_stat.speed > graph_max[dir]) {
 							++max_count[dir][0];
 							if (max_count[dir][1] > 0) --max_count[dir][1];
@@ -2532,8 +2592,10 @@ namespace Net {
 				selected_iface.clear();
 				//? Try to set to a connected interface
 				for (const auto& iface : sorted_interfaces) {
-					if (net.at(iface).connected) selected_iface = iface;
-					break;
+					if (net.at(iface).connected) {
+						selected_iface = iface;
+						break;
+					}
 				}
 				//? If no interface is connected set to first available
 				if (selected_iface.empty() and not sorted_interfaces.empty()) selected_iface = sorted_interfaces.at(0);
@@ -2594,7 +2656,7 @@ namespace Proc {
 	static std::unordered_set<size_t> kernels_procs = {KTHREADD};
 
 	//* Get detailed info for selected process
-	void _collect_details(const size_t pid, const uint64_t uptime, vector<proc_info>& procs) {
+	static void _collect_details(const size_t pid, const uint64_t uptime, vector<proc_info>& procs) {
 		fs::path pid_path = Shared::procPath / std::to_string(pid);
 
 		if (pid != detailed.last_pid) {

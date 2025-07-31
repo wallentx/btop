@@ -27,6 +27,52 @@ tab-size = 4
 namespace rng = std::ranges;
 using namespace Tools;
 
+namespace Cpu {
+	string trim_name(string name) {
+		auto name_vec = ssplit(name);
+
+		if ((s_contains(name, "Xeon"s) or v_contains(name_vec, "Duo"s)) and v_contains(name_vec, "CPU"s)) {
+			auto cpu_pos = v_index(name_vec, "CPU"s);
+			if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')'))
+				name = name_vec.at(cpu_pos + 1);
+			else
+				name.clear();
+		} else if (v_contains(name_vec, "Ryzen"s)) {
+			auto ryz_pos = v_index(name_vec, "Ryzen"s);
+			name = "Ryzen";
+			int tokens = 0;
+			for (auto i = ryz_pos + 1; i < name_vec.size() && tokens < 2; i++) {
+				const std::string& p = name_vec.at(i);
+				if (p != "AI" && p != "PRO")
+					tokens++;
+				name += " " + p;
+			}
+		} else if (s_contains(name, "Intel"s) and v_contains(name_vec, "CPU"s)) {
+			auto cpu_pos = v_index(name_vec, "CPU"s);
+			if (cpu_pos < name_vec.size() - 1 and not name_vec.at(cpu_pos + 1).ends_with(')') and name_vec.at(cpu_pos + 1) != "@")
+				name = name_vec.at(cpu_pos + 1);
+			else
+				name.clear();
+		} else
+			name.clear();
+
+		if (name.empty() and not name_vec.empty()) {
+			for (const auto &n : name_vec) {
+				if (n == "@") break;
+				name += n + ' ';
+			}
+			name.pop_back();
+			for (const auto& replace : {"Processor", "CPU", "(R)", "(TM)", "Intel", "AMD", "Apple", "Core"}) {
+				name = s_replace(name, replace, "");
+				name = s_replace(name, "  ", " ");
+			}
+			name = trim(name);
+		}
+
+		return name;
+	}
+}
+
 #ifdef GPU_SUPPORT
 namespace Gpu {
 	vector<string> gpu_names;
@@ -113,20 +159,24 @@ namespace Proc {
 		}
 	}
 
-	bool matches_filter(const proc_info& proc, const std::string& filter) {
+	auto matches_filter(const proc_info& proc, const std::string& filter) -> bool {
 		if (filter.starts_with("!")) {
 			if (filter.size() == 1) {
 				return true;
 			}
-			std::regex regex{filter.substr(1), std::regex::extended};
-			return std::regex_search(std::to_string(proc.pid), regex) ||
-				   std::regex_search(proc.name, regex) || std::regex_match(proc.cmd, regex) ||
-				   std::regex_search(proc.user, regex);
-		} else {
-			return s_contains(std::to_string(proc.pid), filter) ||
-				   s_contains_ic(proc.name, filter) || s_contains_ic(proc.cmd, filter) ||
-				   s_contains_ic(proc.user, filter);
+
+			// An incomplete regex throws, see issue https://github.com/aristocratos/btop/issues/1133
+			try {
+				std::regex regex { filter.substr(1), std::regex::extended };
+				return std::regex_search(std::to_string(proc.pid), regex) || std::regex_search(proc.name, regex) ||
+							 std::regex_match(proc.cmd, regex) || std::regex_search(proc.user, regex);
+			} catch (std::regex_error& /* unused */) {
+				return false;
+			}
 		}
+
+		return s_contains(std::to_string(proc.pid), filter) || s_contains_ic(proc.name, filter) ||
+					 s_contains_ic(proc.cmd, filter) || s_contains_ic(proc.user, filter);
 	}
 
 	void _tree_gen(proc_info& cur_proc, vector<proc_info>& in_procs, vector<tree_proc>& out_procs,

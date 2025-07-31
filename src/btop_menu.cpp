@@ -16,20 +16,22 @@ indent = tab
 tab-size = 4
 */
 
-#include <deque>
-#include <unordered_map>
-#include <array>
-#include <signal.h>
-#include <errno.h>
-#include <cmath>
-#include <filesystem>
-
 #include "btop_menu.hpp"
-#include "btop_tools.hpp"
+
 #include "btop_config.hpp"
-#include "btop_theme.hpp"
 #include "btop_draw.hpp"
 #include "btop_shared.hpp"
+#include "btop_theme.hpp"
+#include "btop_tools.hpp"
+
+#include <errno.h>
+#include <signal.h>
+
+#include <array>
+#include <cmath>
+#include <filesystem>
+#include <unordered_map>
+#include <utility>
 
 using std::array;
 using std::ceil;
@@ -655,12 +657,13 @@ namespace Menu {
 				"Separate multiple values with",
 				"whitespace \" \".",
 				"",
-				"Begin line with \"exclude=\" to change to",
-				"exclude filter.",
-				"Otherwise defaults to \"most include\" filter.",
+				"Only disks matching the filter will be shown.",
+				"Prepend \033[3mexclude=\033[23m to only show disks ",
+				"not matching the filter.",
 				"",
-				"Example:",
-				"\"exclude=/boot /home/user\""},
+				"Examples:",
+				"/boot /home/user",
+				"exclude=/boot /home/user"},
 			{"zfs_arc_cached",
 				"(Linux) Count ZFS ARC as cached memory.",
 				"",
@@ -711,6 +714,17 @@ namespace Menu {
 				"",
 				"Will otherwise automatically choose the NIC",
 				"with the highest total download since boot."},
+		    {"base_10_bitrate",
+			    "Base 10 bitrate",
+			    "",
+			    "True:  Use SI prefixes for bitrates",
+			    "       (1000Kbps = 1Mbps)",
+			    "False: Use binary prefixes for bitrates",
+			    "       (1024Kibps = 1Mibps)",
+			    "Auto:  Use the General -> Base 10 Sizes",
+			    "       setting for bitrates",
+			    "",
+			    "True, False, or Auto",},
 		},
 		{
 			{"proc_left",
@@ -787,7 +801,7 @@ namespace Menu {
 	};
 
 	msgBox::msgBox() {}
-	msgBox::msgBox(int width, int boxtype, vector<string> content, string title)
+	msgBox::msgBox(int width, int boxtype, const vector<string>& content, const std::string_view title)
 	: width(width), boxtype(boxtype) {
 		auto tty_mode = Config::getB("tty_mode");
 		auto rounded = Config::getB("rounded_corners");
@@ -813,12 +827,12 @@ namespace Menu {
 	string msgBox::operator()() {
 		string out;
 		int pos = width / 2 - (boxtype == 0 ? 6 : 14);
-		auto& first_color = (selected == 0 ? Theme::c("hi_fg") : Theme::c("div_line"));
+		const auto first_color = (selected == 0 ? Theme::c("hi_fg") : Theme::c("div_line"));
 		out = Mv::d(1) + Mv::r(pos) + Fx::b + first_color + button_left + (selected == 0 ? Theme::c("title") : Theme::c("main_fg") + Fx::ub)
 			+ (boxtype == 0 ? "    Ok    " : "    Yes    ") + first_color + button_right;
 		mouse_mappings["button1"] = Input::Mouse_loc{y + height - 4, x + pos + 1, 3, 12 + (boxtype > 0 ? 1 : 0)};
 		if (boxtype > 0) {
-			auto& second_color = (selected == 1 ? Theme::c("hi_fg") : Theme::c("div_line"));
+			const auto second_color = (selected == 1 ? Theme::c("hi_fg") : Theme::c("div_line"));
 			out += Mv::r(2) + second_color + button_left + (selected == 1 ? Theme::c("title") : Theme::c("main_fg") + Fx::ub)
 				+ "    No    " + second_color + button_right;
 			mouse_mappings["button2"] = Input::Mouse_loc{y + height - 4, x + pos + 15 + (boxtype > 0 ? 1 : 0), 3, 12};
@@ -827,7 +841,7 @@ namespace Menu {
 	}
 
 	//? Process input
-	int msgBox::input(string key) {
+	int msgBox::input(const string& key) {
 		if (key.empty()) return Invalid;
 
 		if (is_in(key, "escape", "backspace", "q") or key == "button2") {
@@ -867,8 +881,8 @@ namespace Menu {
 		button_left.shrink_to_fit();
 		button_right.clear();
 		button_right.shrink_to_fit();
-		if (mouse_mappings.contains("button1")) mouse_mappings.erase("button1");
-		if (mouse_mappings.contains("button2")) mouse_mappings.erase("button2");
+		mouse_mappings.erase("button1");
+		mouse_mappings.erase("button2");
 	}
 
 	enum menuReturnCodes {
@@ -878,7 +892,7 @@ namespace Menu {
 		Switch
 	};
 
-	int signalChoose(const string& key) {
+	static int signalChoose(const string& key) {
 		auto s_pid = (Config::getB("show_detailed") and Config::getI("selected_pid") == 0 ? Config::getI("detailed_pid") : Config::getI("selected_pid"));
 		static int x{};
 		static int y{};
@@ -986,12 +1000,12 @@ namespace Menu {
 		return (redraw ? Changed : retval);
 	}
 
-	int sizeError(const string& key) {
+	static int sizeError(const string& key) {
 		if (redraw) {
-			vector<string> cont_vec;
-			cont_vec.push_back(Fx::b + Theme::g("used")[100] + "Error:" + Theme::c("main_fg") + Fx::ub);
-			cont_vec.push_back("Terminal size to small to" + Fx::reset);
-			cont_vec.push_back("display menu or box!" + Fx::reset);
+			vector<string> cont_vec {
+				Fx::b + Theme::g("used")[100] + "Error:" + Theme::c("main_fg") + Fx::ub,
+				"Terminal size too small to" + Fx::reset,
+				"display menu or box!" + Fx::reset };
 
 			messageBox = Menu::msgBox{45, 0, cont_vec, "error"};
 			Global::overlay = messageBox();
@@ -1008,7 +1022,7 @@ namespace Menu {
 		return NoChange;
 	}
 
-	int signalSend(const string& key) {
+	static int signalSend(const string& key) {
 		auto s_pid = (Config::getB("show_detailed") and Config::getI("selected_pid") == 0 ? Config::getI("detailed_pid") : Config::getI("selected_pid"));
 		if (s_pid == 0) return Closed;
 		if (redraw) {
@@ -1048,7 +1062,7 @@ namespace Menu {
 		return NoChange;
 	}
 
-	int signalReturn(const string& key) {
+	static int signalReturn(const string& key) {
 		if (redraw) {
 			vector<string> cont_vec;
 			cont_vec.push_back(Fx::b + Theme::g("used")[100] + "Failure:" + Theme::c("main_fg") + Fx::ub);
@@ -1080,7 +1094,7 @@ namespace Menu {
 		return NoChange;
 	}
 
-	int mainMenu(const string& key) {
+	static int mainMenu(const string& key) {
 		enum MenuItems { Options, Help, Quit };
 		static int y{};
 		static int selected{};
@@ -1159,8 +1173,8 @@ namespace Menu {
 		return (redraw ? Changed : retval);
 	}
 
-	int optionsMenu(const string& key) {
-		enum Predispositions { isBool, isInt, isString, is2D, isBrowseable, isEditable};
+static int optionsMenu(const string& key) {
+ 		enum Predispositions { isBool, isInt, isString, is2D, isBrowsable, isEditable};
 		static int y{};
 		static int x{};
 		static int height{};
@@ -1190,6 +1204,7 @@ namespace Menu {
 			{"cpu_graph_lower", std::cref(Cpu::available_fields)},
 			{"cpu_sensor", std::cref(Cpu::available_sensors)},
 			{"selected_battery", std::cref(Config::available_batteries)},
+	        {"base_10_bitrate", std::cref(Config::base_10_bitrate_values)},
 		#ifdef GPU_SUPPORT
 			{"show_gpu_info", std::cref(Config::show_gpu_values)},
 			{"graph_symbol_gpu", std::cref(Config::valid_graph_symbols_def)},
@@ -1314,10 +1329,12 @@ namespace Menu {
 		else if (pages > 1 and key == "page_down") {
 			if (++page >= pages) page = 0;
 			selected = 0;
+			last_sel = -1;
 		}
 		else if (pages > 1 and key == "page_up") {
 			if (--page < 0) page = pages - 1;
 			selected = 0;
+			last_sel = -1;
 		}
 		else if (key == "tab") {
 			if (++selected_cat >= (int)categories.size()) selected_cat = 0;
@@ -1369,7 +1386,7 @@ namespace Menu {
 					recollect = true;
 				}
 			}
-			else if (selPred.test(isBrowseable)) {
+			else if (selPred.test(isBrowsable)) {
 				auto& optList = optionsList.at(option).get();
 				int i = v_index(optList, Config::getS(option));
 
@@ -1382,6 +1399,9 @@ namespace Menu {
 				else if (option == "log_level") {
 					Logger::set(optList.at(i));
 					Logger::info("Logger set to " + optList.at(i));
+				}
+				else if (option == "base_10_bitrate") {
+				    recollect = true;
 				}
 				else if (is_in(option, "proc_sorting", "cpu_sensor", "show_gpu_info") or option.starts_with("graph_symbol") or option.starts_with("cpu_graph_"))
 					screen_redraw = true;
@@ -1421,9 +1441,9 @@ namespace Menu {
 				if (not selPred.test(isString))
 					selPred.set(is2D);
 				else if (optionsList.contains(selOption)) {
-					selPred.set(isBrowseable);
+					selPred.set(isBrowsable);
 				}
-				if (not selPred.test(isBrowseable) and (selPred.test(isString) or selPred.test(isInt)))
+				if (not selPred.test(isBrowsable) and (selPred.test(isString) or selPred.test(isInt)))
 					selPred.set(isEditable);
 			}
 
@@ -1454,18 +1474,18 @@ namespace Menu {
 			auto cy = y+9;
 			for (int c = 0, i = max(0, item_height * page); c++ < item_height and i < (int)categories[selected_cat].size(); i++) {
 				const auto& option = categories[selected_cat][i][0];
-				const auto& value = (option == "color_theme" ? (string) fs::path(Config::getS("color_theme")).stem() : Config::getAsString(option));
+				const auto& value = (option == "color_theme" ? fs::path(Config::getS("color_theme")).stem().string() : Config::getAsString(option));
 
 				out += Mv::to(cy++, x + 1) + (c-1 == selected ? Theme::c("selected_bg") + Theme::c("selected_fg") : Theme::c("title"))
 					+ Fx::b + cjust(capitalize(s_replace(option, "_", " "))
-						+ (c-1 == selected and selPred.test(isBrowseable)
+						+ (c-1 == selected and selPred.test(isBrowsable)
 							? ' ' + to_string(v_index(optionsList.at(option).get(), (option == "color_theme" ? Config::getS("color_theme") : value)) + 1) + '/' + to_string(optionsList.at(option).get().size())
 							: ""), 29);
 				out	+= Mv::to(cy++, x + 1) + (c-1 == selected ? "" : Theme::c("main_fg")) + Fx::ub + "  "
 					+ (c-1 == selected and editing ? cjust(editor(24), 34, true) : cjust(value, 25, true)) + "  ";
 
 				if (c-1 == selected) {
-					if (not editing and (selPred.test(is2D) or selPred.test(isBrowseable))) {
+					if (not editing and (selPred.test(is2D) or selPred.test(isBrowsable))) {
 						out += Fx::b + Mv::to(cy-1, x+2) + Symbols::left + Mv::to(cy-1, x+28) + Symbols::right;
 						mouse_mappings["left"] = {cy-2, x, 2, 5};
 						mouse_mappings["right"] = {cy-2, x+25, 2, 5};
@@ -1515,7 +1535,7 @@ namespace Menu {
 		return (redraw ? Changed : retval);
 	}
 
-	int helpMenu(const string& key) {
+	static int helpMenu(const string& key) {
 		static int y{};
 		static int x{};
 		static int height{};
@@ -1580,7 +1600,7 @@ namespace Menu {
 	};
 	bitset<8> menuMask;
 
-	void process(string key) {
+	void process(const std::string_view key) {
 		if (menuMask.none()) {
 			Menu::active = false;
 			Global::overlay.clear();
@@ -1610,7 +1630,7 @@ namespace Menu {
 
 		}
 
-		auto retCode = menuFunc.at(currentMenu)(key);
+		auto retCode = menuFunc.at(currentMenu)(key.data());
 		if (retCode == Closed) {
 			menuMask.reset(currentMenu);
 			mouse_mappings.clear();

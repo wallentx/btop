@@ -191,6 +191,8 @@ void term_resize(bool force) {
 	Input::interrupt();
 }
 
+static std::atomic_flag prunner_thread_cancel;
+
 //* Exit handler; stops threads, restores terminal and saves config changes
 void clean_quit(int sig) {
 	if (Global::quitting) return;
@@ -203,11 +205,8 @@ void clean_quit(int sig) {
 			pthread_cancel(Runner::runner_id);
 		}
 	#else
-		constexpr struct timespec ts { .tv_sec = 5, .tv_nsec = 0 };
-		if (pthread_timedjoin_np(Runner::runner_id, nullptr, &ts) != 0) {
-			Logger::warning("Failed to join _runner thread on exit!");
-			pthread_cancel(Runner::runner_id);
-		}
+		if (atomic_flag_test_and_set(&prunner_thread_cancel)) pthread_exit(NULL);
+		atomic_flag_clear(&prunner_thread_cancel);
 	#endif
 	}
 
@@ -720,7 +719,7 @@ namespace Runner {
 			Logger::error("Stall in Runner thread, restarting!");
 			active = false;
 			// exit(1);
-			pthread_cancel(Runner::runner_id);
+			atomic_flag_test_and_set(&prunner_thread_cancel);
 			if (pthread_create(&Runner::runner_id, nullptr, &Runner::_runner, nullptr) != 0) {
 				Global::exit_error_msg = "Failed to re-create _runner thread!";
 				clean_quit(1);

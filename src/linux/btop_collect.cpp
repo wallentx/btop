@@ -33,6 +33,10 @@ tab-size = 4
 #include <future>
 #include <dlfcn.h>
 #include <utility>
+#include <stdexcept>
+#include <sys/sysinfo.h> // Correctly placed include for sysinfo()
+
+extern "C" int sysinfo(struct sysinfo *info); // Explicit declaration
 
 #if defined(RSMI_STATIC)
 	#include <rocm_smi/rocm_smi.h>
@@ -362,11 +366,17 @@ namespace Cpu {
 				getline(cpuinfo, name);
 			}
 			else if (fs::exists("/sys/devices")) {
-				for (const auto& d : fs::directory_iterator("/sys/devices")) {
-					if (string(d.path().filename()).starts_with("arm")) {
-						name = d.path().filename();
-						break;
+				// Attempt to detect ARM device names; skip entries with permission issues
+				try {
+					for (const auto& d :
+					     fs::directory_iterator("/sys/devices", fs::directory_options::skip_permission_denied)) {
+						if (string(d.path().filename()).starts_with("arm")) {
+							name = d.path().filename();
+							break;
+						}
 					}
+				} catch (const fs::filesystem_error&) {
+					// ignore permission errors when scanning devices
 				}
 				if (not name.empty()) {
 					auto name_vec = ssplit(name, '_');
@@ -880,11 +890,32 @@ namespace Cpu {
 		if (Config::getB("show_cpu_freq"))
 			cpuHz = get_cpuHz();
 
-		if (getloadavg(cpu.load_avg.data(), cpu.load_avg.size()) < 0) {
-			Logger::error("failed to get load averages");
-		}
+	        // Declare and open ifstream once
+                std::ifstream cread(Shared::procPath / "stat");
 
-		ifstream cread;
+                if (!cread.is_open()) {
+                    Logger::warning("/proc/stat is not accessible. Falling back to sysinfo().");
+
+                    // Use sysinfo() as a fallback
+                    struct sysinfo info;
+                    if (sysinfo(&info) != 0) {
+                        throw std::runtime_error("Failed to retrieve system load averages via sysinfo().");
+                    }
+
+                    // Convert load averages from fixed-point to floating-point
+                    cpu.load_avg[0] = info.loads[0] / 65536.0;
+                    cpu.load_avg[1] = info.loads[1] / 65536.0;
+                    cpu.load_avg[2] = info.loads[2] / 65536.0;
+
+                    Logger::warning("Load averages retrieved via sysinfo(): " +
+                                    std::to_string(cpu.load_avg[0]) + ", " +
+                                    std::to_string(cpu.load_avg[1]) + ", " +
+                                    std::to_string(cpu.load_avg[2]));
+
+                    // Provide default values for CPU percent
+                    cpu.cpu_percent["total"].push_back(0);
+                    return cpu;
+                }
 
 		try {
 			//? Get cpu total times for all cores from /proc/stat
@@ -2796,14 +2827,18 @@ namespace Proc {
 			}
 
 			//? Get cpu total times from /proc/stat
-			cputimes = 0;
-			pread.open(Shared::procPath / "stat");
-			if (pread.good()) {
-				pread.ignore(SSmax, ' ');
-				for (uint64_t times; pread >> times; cputimes += times);
-			}
-			else throw std::runtime_error("Failure to read /proc/stat");
-			pread.close();
+           cputimes = 0;
+           pread.open(Shared::procPath / "stat");
+           if (pread.good()) {
+               pread.ignore(SSmax, ' ');
+               for (uint64_t times; pread >> times; cputimes += times);
+               pread.close();
+           } else {
+               Logger::warning("/proc/stat is not accessible. Skipping process CPU time collection.");
+               // Preserve previous value to avoid division by zero in CPU percentage calculation
+               cputimes = old_cputimes;
+               pread.close();
+           }
 
 			//? Iterate over all pids in /proc
 			for (const auto& d: fs::directory_iterator(Shared::procPath)) {
@@ -3092,6 +3127,7 @@ namespace Proc {
 
 namespace Tools {
 	double system_uptime() {
+		// Attempt to read uptime from /proc/uptime
 		string upstr;
 		ifstream pread(Shared::procPath / "uptime");
 		if (pread.good()) {
@@ -3103,6 +3139,11 @@ namespace Tools {
 			catch (const std::invalid_argument&) {}
 			catch (const std::out_of_range&) {}
 		}
-        throw std::runtime_error("Failed to get uptime from " + string{Shared::procPath} + "/uptime");
+		// Fallback to sysinfo() if reading from /proc failed
+		struct sysinfo info;
+		if (sysinfo(&info) == 0) {
+			return static_cast<double>(info.uptime);
+		}
+		throw std::runtime_error("Failed to get system uptime");
 	}
 }

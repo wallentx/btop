@@ -1,0 +1,50 @@
+--- a/src/linux/btop_collect.cpp
++++ b/src/linux/btop_collect.cpp
+@@ -1,3 +1,10 @@
++#include <fstream>
++#include <stdexcept>
++#include <cmath>
++#include <sys/sysinfo.h> // Correctly placed include for sysinfo()
++
++extern "C" int sysinfo(struct sysinfo *info); // Explicit declaration
++
+ /* Copyright 2021 Aristocratos (jakob@qvantnet.com)
+ 
+    Licensed under the Apache License, Version 2.0 (the "License");
+@@ -886,7 +893,35 @@
+ 		if (Config::getB("show_cpu_freq"))
+ 			cpuHz = get_cpuHz();
+ 
+-		if (getloadavg(cpu.load_avg.data(), cpu.load_avg.size()) < 0) {
++		    // Declare and open ifstream once
++    std::ifstream cread(Shared::procPath / "stat");
++
++    if (!cread.is_open()) {
++        Logger::warning("/proc/stat is not accessible. Falling back to sysinfo().");
++
++        // Use sysinfo() as a fallback
++        struct sysinfo info;
++        if (sysinfo(&info) != 0) {
++            throw std::runtime_error("Failed to retrieve system load averages via sysinfo().");
++        }
++
++        // Convert load averages from fixed-point to floating-point
++        cpu.load_avg[0] = info.loads[0] / 65536.0;
++        cpu.load_avg[1] = info.loads[1] / 65536.0;
++        cpu.load_avg[2] = info.loads[2] / 65536.0;
++
++        Logger::warning("Load averages retrieved via sysinfo(): " +
++                        std::to_string(cpu.load_avg[0]) + ", " +
++                        std::to_string(cpu.load_avg[1]) + ", " +
++                        std::to_string(cpu.load_avg[2]));
++
++        // Provide default values for CPU percent
++        cpu.cpu_percent["total"].push_back(0);
++        return cpu;
++    }
++
++    // Original parsing logic for /proc/stat
++    try {
+ 			Logger::error("failed to get load averages");
+ 		}
+ 

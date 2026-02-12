@@ -219,6 +219,10 @@ void clean_quit(int sig) {
 			Logger::warning("Failed to join _runner thread on exit!");
 			pthread_cancel(Runner::runner_id);
 		}
+	#elif defined __ANDROID__
+		if (pthread_join(Runner::runner_id, nullptr) != 0) {
+			Logger::warning("Failed to join _runner thread on exit!");
+		}
 	#else
 		constexpr struct timespec ts { .tv_sec = 5, .tv_nsec = 0 };
 		if (pthread_timedjoin_np(Runner::runner_id, nullptr, &ts) != 0) {
@@ -739,6 +743,10 @@ namespace Runner {
 			Logger::error("Stall in Runner thread, restarting!");
 			set_active(false);
 			// exit(1);
+		#if defined __ANDROID__
+			Logger::warning("Skipping runner thread cancel/restart on Android due missing pthread_cancel()");
+			return;
+		#else
 			pthread_cancel(Runner::runner_id);
 
 			// Wait for the thread to actually terminate before creating a new one
@@ -747,7 +755,7 @@ namespace Runner {
 			if (join_result != 0) {
 				Logger::warning("Failed to join cancelled thread: {}", strerror(join_result));
 			}
-
+		#endif
 			if (pthread_create(&Runner::runner_id, nullptr, &Runner::_runner, nullptr) != 0) {
 				Global::exit_error_msg = "Failed to re-create _runner thread!";
 				clean_quit(1);

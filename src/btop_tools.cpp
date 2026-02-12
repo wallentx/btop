@@ -559,14 +559,15 @@ namespace Tools {
 	}
 
 	string readfile(const std::filesystem::path& path, const string& fallback) {
-		if (not fs::exists(path)) return fallback;
 		string out;
 		try {
+			if (not fs::exists(path))
+				return fallback;
 			std::ifstream file(path);
 			for (string readstr; getline(file, readstr); out += readstr);
 		}
 		catch (const std::exception& e) {
-			Logger::error("readfile() : Exception when reading {} : {}", path, e.what());
+			Logger::error("readfile() : Exception when reading {} : {}", path.string(), e.what());
 			return fallback;
 		}
 		return (out.empty() ? fallback : out);

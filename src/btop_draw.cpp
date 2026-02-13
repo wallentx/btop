@@ -550,6 +550,11 @@ namespace Cpu {
 		bool show_temps = (Config::getB("check_temp") and got_sensors);
 		bool show_watts = (Config::getB("show_cpu_watts") and supports_watts);
 		auto single_graph = Config::getB("cpu_single_graph");
+	#ifdef __ANDROID__
+		const bool android_cluster_layout = not Cpu::android_clusters.empty();
+	#else
+		const bool android_cluster_layout = false;
+	#endif
 		bool hide_cores = show_temps and (cpu_temp_only or not Config::getB("show_coretemp"));
 		const int extra_width = (hide_cores ? max(6, 6 * b_column_size) : (b_columns == 1 && !show_temps) ? 8 : 0);
 #if defined(GPU_SUPPORT)
@@ -574,6 +579,7 @@ namespace Cpu {
 		auto& graph_bg = Symbols::graph_symbols.at((graph_symbol == "default" ? Config::getS("graph_symbol") + "_up" : graph_symbol + "_up")).at(6);
 		auto& temp_scale = Config::getS("temp_scale");
 		auto cpu_bottom = Config::getB("cpu_bottom");
+		const int android_cluster_graph_w = max(6, b_width - (show_temps ? 30 : 20));
 
 		const string& title_left = Theme::c("cpu_box") + (cpu_bottom ? Symbols::title_left_down : Symbols::title_left);
 		const string& title_right = Theme::c("cpu_box") + (cpu_bottom ? Symbols::title_right_down : Symbols::title_right);
@@ -613,7 +619,7 @@ namespace Cpu {
 			}
 
 			//? Graphs & meters
-			const int graph_default_width = x + width - b_width - 3;
+			const int graph_default_width = max(10, x + width - b_width - 3);
 
 			auto init_graphs = [&](vector<Draw::Graph>& graphs, const int graph_height, int& graph_width, const string& graph_field, bool invert) {
 			#ifdef GPU_SUPPORT
@@ -713,8 +719,15 @@ namespace Cpu {
 
 			if (b_column_size > 0 or extra_width > 0) {
 				core_graphs.clear();
-				for (const auto& core_data : cpu.core_percent) {
-					core_graphs.emplace_back(5 * b_column_size + extra_width, 1, "cpu", core_data, graph_symbol);
+				if (android_cluster_layout) {
+					for (const auto& core_data : cpu.core_percent) {
+						core_graphs.emplace_back(android_cluster_graph_w, 1, "cpu", core_data, graph_symbol);
+					}
+				}
+				else {
+					for (const auto& core_data : cpu.core_percent) {
+						core_graphs.emplace_back(5 * b_column_size + extra_width, 1, "cpu", core_data, graph_symbol);
+					}
 				}
 			}
 
@@ -834,7 +847,7 @@ namespace Cpu {
 		#endif
 
 			//? Cpu clock and cpu meter
-			if (Config::getB("show_cpu_freq") and not cpuHz.empty())
+			if (Config::getB("show_cpu_freq") and not cpuHz.empty() and not android_cluster_layout)
 				out += Mv::to(b_y, b_x + b_width - (freq_range ? 20 : 10)) + Fx::ub + Theme::c("div_line")
 					+ Symbols::h_line * ((freq_range ? 17 : 7) - cpuHz.size())
 					+ Symbols::title_left + Fx::b + Theme::c("title") + cpuHz + Fx::ub + Theme::c("div_line") + Symbols::title_right;
@@ -877,54 +890,83 @@ namespace Cpu {
 		//? Core text and graphs
 		int cx = 0, cy = 1, cc = 0, core_width = (b_column_size == 0 ? 2 : 3);
 		if (Shared::coreCount >= 100) core_width++;
-		for (const auto& n : iota(0, Shared::coreCount)) {
-			auto enabled = is_cpu_enabled(n);
-			out += Mv::to(b_y + cy + 1, b_x + cx + 1) + Theme::c(enabled ? "main_fg" : "inactive_fg") + (Shared::coreCount < 100 ? Fx::b + 'C' + Fx::ub : "")
-				+ ljust(to_string(n), core_width);
-			if ((b_column_size > 0 or extra_width > 0) and cmp_less(n, core_graphs.size()))
-				out += Theme::c("inactive_fg") + graph_bg * (5 * b_column_size + extra_width) + Mv::l(5 * b_column_size + extra_width)
-					+ core_graphs.at(n)(safeVal(cpu.core_percent, n), data_same or redraw);
+		if (android_cluster_layout) {
+			const int sub_x = b_x + 1;
+			const int sub_w = b_width - 2;
+			for (const auto& cluster : Cpu::android_clusters) {
+				if (cluster.cores.empty()) continue;
+				const int sub_h = (int)cluster.cores.size() + 2;
+				if (cy + sub_h >= b_height - 1) break;
+				const int sub_y = b_y + cy + 1;
+				const string c_name = uresize(cluster.name, max(1, sub_w - 14));
+				out += Draw::createBox(sub_x, sub_y, sub_w, sub_h, Theme::c("div_line"), false, c_name);
+				if (not cluster.freq.empty()) {
+					out += Mv::to(sub_y, sub_x + sub_w - (int)cluster.freq.size() - 4) + Theme::c("div_line") + Symbols::title_left + Fx::b + Theme::c("title")
+						+ cluster.freq + Fx::ub + Theme::c("div_line") + Symbols::title_right;
+				}
+				for (size_t i = 0; i < cluster.cores.size(); i++) {
+					const int n = cluster.cores.at(i);
+					if (n < 0 or n >= Shared::coreCount) continue;
+					const auto enabled = is_cpu_enabled(n);
+					out += Mv::to(sub_y + 1 + (int)i, sub_x + 1) + Theme::c(enabled ? "main_fg" : "inactive_fg")
+						+ (Shared::coreCount < 100 ? Fx::b + 'C' + Fx::ub : "") + ljust(to_string(n), core_width);
+					if (cmp_less((size_t)n, core_graphs.size()))
+						out += Theme::c("inactive_fg") + graph_bg * android_cluster_graph_w + Mv::l(android_cluster_graph_w)
+							+ core_graphs.at(n)(safeVal(cpu.core_percent, n), data_same or redraw);
+					out += enabled ? Theme::g("cpu").at(clamp(safeVal(cpu.core_percent, n).back(), 0ll, 100ll)) : Theme::c("inactive_fg");
+					out += rjust(to_string(safeVal(cpu.core_percent, n).back()), 4) + Theme::c(enabled ? "main_fg" : "inactive_fg") + '%';
+				}
+				cy += sub_h;
+			}
+		}
+		else {
+			for (const auto& n : iota(0, Shared::coreCount)) {
+				auto enabled = is_cpu_enabled(n);
+				out += Mv::to(b_y + cy + 1, b_x + cx + 1) + Theme::c(enabled ? "main_fg" : "inactive_fg") + (Shared::coreCount < 100 ? Fx::b + 'C' + Fx::ub : "")
+					+ ljust(to_string(n), core_width);
+				if ((b_column_size > 0 or extra_width > 0) and cmp_less(n, core_graphs.size()))
+					out += Theme::c("inactive_fg") + graph_bg * (5 * b_column_size + extra_width) + Mv::l(5 * b_column_size + extra_width)
+						+ core_graphs.at(n)(safeVal(cpu.core_percent, n), data_same or redraw);
 
-			out += enabled ? Theme::g("cpu").at(clamp(safeVal(cpu.core_percent, n).back(), 0ll, 100ll)) : Theme::c("inactive_fg");
-			out += rjust(to_string(safeVal(cpu.core_percent, n).back()), (b_column_size < 2 ? 3 : 4)) + Theme::c(enabled ? "main_fg" : "inactive_fg") + '%';
+				out += enabled ? Theme::g("cpu").at(clamp(safeVal(cpu.core_percent, n).back(), 0ll, 100ll)) : Theme::c("inactive_fg");
+				out += rjust(to_string(safeVal(cpu.core_percent, n).back()), (b_column_size < 2 ? 3 : 4)) + Theme::c(enabled ? "main_fg" : "inactive_fg") + '%';
 
-			if (show_temps and not hide_cores) {
-				const auto core_temps = safeVal(cpu.temp, n + 1);
-				if (!core_temps.empty()) {
-					// FIXME: This should be checked during collection and just not be made available with
-					// something like `std::nullopt`.
-					const auto last_temp = core_temps.back();
-					const auto [temp, unit] = celsius_to(last_temp, temp_scale);
-					const auto temp_color = enabled ? Theme::g("temp").at(clamp(last_temp * 100 / cpu.temp_max, 0ll, 100ll)) : Theme::c("inactive_fg");
-					if (b_column_size > 1 and std::cmp_greater_equal(temp_graphs.size(), n)) {
+				if (show_temps and not hide_cores) {
+					const auto core_temps = safeVal(cpu.temp, n + 1);
+					if (!core_temps.empty()) {
+						const auto last_temp = core_temps.back();
+						const auto [temp, unit] = celsius_to(last_temp, temp_scale);
+						const auto temp_color = enabled ? Theme::g("temp").at(clamp(last_temp * 100 / cpu.temp_max, 0ll, 100ll)) : Theme::c("inactive_fg");
+						if (b_column_size > 1 and std::cmp_greater_equal(temp_graphs.size(), n)) {
+							fmt::format_to(
+								std::back_inserter(out),
+								" {}{}{}{}", Theme::c("inactive_fg"),
+								graph_bg * 5, Mv::l(5),
+								temp_graphs.at(n + 1)(core_temps, data_same || redraw)
+							);
+						}
 						fmt::format_to(
 							std::back_inserter(out),
-							" {}{}{}{}", Theme::c("inactive_fg"),
-							graph_bg * 5, Mv::l(5),
-							temp_graphs.at(n + 1)(core_temps, data_same || redraw)
+							"{}{}{}{}",
+							temp_color,
+							rjust(std::to_string(temp), 4),
+							Theme::c(enabled ? "main_fg" : "inactive_fg"),
+							unit
 						);
 					}
-					fmt::format_to(
-						std::back_inserter(out),
-						"{}{}{}{}",
-						temp_color,
-						rjust(std::to_string(temp), 4),
-						Theme::c(enabled ? "main_fg" : "inactive_fg"),
-						unit
-					);
 				}
-			}
 
-			out += Theme::c("div_line") + Symbols::v_line;
+				out += Theme::c("div_line") + Symbols::v_line;
 
-			if ((++cy > ceil((double)Shared::coreCount / b_columns) or cy == max_row) and n != Shared::coreCount - 1) {
-				if (++cc >= b_columns) break;
-				cy = 1; cx = (b_width / b_columns) * cc;
+				if ((++cy > ceil((double)Shared::coreCount / b_columns) or cy == max_row) and n != Shared::coreCount - 1) {
+					if (++cc >= b_columns) break;
+					cy = 1; cx = (b_width / b_columns) * cc;
+				}
 			}
 		}
 
 		//? Load average
-		if (cy < b_height - 1 and cc <= b_columns) {
+		if (not android_cluster_layout and cy < b_height - 1 and cc <= b_columns) {
 			cy = b_height - 2 - n_gpus_to_show;
 
 			string load_avg_pre = "Load avg:";
@@ -1576,6 +1618,7 @@ namespace Proc {
 	int selected_pid = 0, selected_depth = 0;
 	int scroll_pos;
 	string selected_name;
+	string selected_cmd;
 	std::unordered_map<size_t, Draw::Graph> p_graphs;
 	std::unordered_map<size_t, bool> p_wide_cmd;
 	std::unordered_map<size_t, int> p_counters;
@@ -1932,6 +1975,7 @@ namespace Proc {
 				mouse_x += 6;
 			}
 			out += title_left_down + Fx::b + hi_color + 's' + t_color + "ignals" + Fx::ub + title_right_down;
+			out += title_left_down + Fx::b + t_color + "copy cmd" + Fx::b + hi_color + " y" + t_color + Fx::ub + title_right_down;
 			if (selected > 0) Input::mouse_mappings["s"] = {y + height - 1, mouse_x, 1, 7};
 		    mouse_x += 9;
 		    out += title_left_down + Fx::b + hi_color + 'N' + t_color + "ice" + Fx::ub + title_right_down;
@@ -2018,6 +2062,7 @@ namespace Proc {
 			if (is_selected) {
 				selected_pid = (int)p.pid;
 				selected_name = p.name;
+				selected_cmd = p.cmd;
 				selected_depth = p.depth;
 			}
 
@@ -2280,6 +2325,11 @@ namespace Draw {
 				: 0;
 		#endif
             const bool show_temp = (Config::getB("check_temp") and got_sensors);
+		#ifdef __ANDROID__
+			const bool android_cluster_layout = not Cpu::android_clusters.empty();
+		#else
+			const bool android_cluster_layout = false;
+		#endif
 			width = round((double)Term::width * width_p / 100);
 		#ifdef GPU_SUPPORT
 			if (Gpu::shown != 0 and not (Mem::shown or Net::shown or Proc::shown)) {
@@ -2291,6 +2341,10 @@ namespace Draw {
 		#else
 			height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p) / 100));
 		#endif
+			if (android_cluster_layout) {
+				const int needed_inner_rows = 3 + (int)Shared::coreCount + (int)Cpu::android_clusters.size() * 2;
+				height = max(height, min((int)Term::height, needed_inner_rows + 2));
+			}
 			x = 1;
 			y = cpu_bottom ? Term::height - height + 1 : 1;
 
@@ -2299,6 +2353,7 @@ namespace Draw {
 		#else
 			b_columns = max(1, (int)ceil((double)(Shared::coreCount + 1) / (height - 5)));
 		#endif
+			if (android_cluster_layout) b_columns = 1;
 			if (b_columns * (21 + 12 * show_temp) < width - (width / 3)) {
 				b_column_size = 2;
 				b_width =  max(29, (21 + 12 * show_temp) * b_columns - (b_columns - 1));
@@ -2322,6 +2377,10 @@ namespace Draw {
 		#else
 			b_height = min(height - 2, (int)ceil((double)Shared::coreCount / b_columns) + 4);
 		#endif
+			if (android_cluster_layout) {
+				b_width = clamp((int)round((double)width * 0.48), 38, min(62, width - 12));
+				b_height = height - 2;
+			}
 
 			b_x = x + width - b_width - 1;
 			b_y = y + ceil((double)(height - 2) / 2) - ceil((double)b_height / 2) + 1;

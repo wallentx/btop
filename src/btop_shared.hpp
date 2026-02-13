@@ -202,6 +202,17 @@ namespace Cpu {
 	extern vector<string> available_sensors;
 	extern tuple<int, float, long, string> current_bat;
 	extern std::optional<std::string> container_engine;
+	#ifdef __ANDROID__
+	inline constexpr bool android_fallback_mode = true;
+	#else
+	inline constexpr bool android_fallback_mode = false;
+	#endif
+	struct cluster_info {
+		string name;
+		string freq;
+		vector<int> cores;
+	};
+	extern vector<cluster_info> android_clusters;
 
 	struct cpu_info {
 		std::unordered_map<string, deque<long long>> cpu_percent = {
@@ -327,8 +338,10 @@ namespace Net {
 		struct ifaddrs* ifaddr;
 		int status;
 	public:
-		IfAddrsPtr() { status = getifaddrs(&ifaddr); }
-		~IfAddrsPtr() noexcept { freeifaddrs(ifaddr); }
+		IfAddrsPtr() : ifaddr(nullptr), status(getifaddrs(&ifaddr)) {}
+		~IfAddrsPtr() noexcept {
+			if (status == 0 and ifaddr != nullptr) freeifaddrs(ifaddr);
+		}
 		IfAddrsPtr(const IfAddrsPtr &) = delete;
 		IfAddrsPtr& operator=(IfAddrsPtr& other) = delete;
 		IfAddrsPtr(IfAddrsPtr &&) = delete;
@@ -357,7 +370,7 @@ namespace Proc {
 	extern atomic<int> detailed_pid;
 	extern int selected_pid, start, selected, collapse, expand, filter_found, selected_depth, toggle_children;
 	extern int scroll_pos;
-	extern string selected_name;
+	extern string selected_name, selected_cmd;
 	extern atomic<bool> resized;
 
 	//? Contains the valid sorting options for processes

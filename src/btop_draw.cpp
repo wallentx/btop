@@ -901,7 +901,7 @@ namespace Cpu {
 				const string c_name = uresize(cluster.name, max(1, sub_w - 14));
 				out += Draw::createBox(sub_x, sub_y, sub_w, sub_h, Theme::c("div_line"), false, c_name);
 				if (not cluster.freq.empty()) {
-					out += Mv::to(sub_y, sub_x + sub_w - (int)cluster.freq.size() - 4) + Symbols::title_left + Fx::b + Theme::c("title")
+					out += Mv::to(sub_y, sub_x + sub_w - (int)cluster.freq.size() - 4) + Theme::c("div_line") + Symbols::title_left + Fx::b + Theme::c("title")
 						+ cluster.freq + Fx::ub + Theme::c("div_line") + Symbols::title_right;
 				}
 				for (size_t i = 0; i < cluster.cores.size(); i++) {
@@ -2342,7 +2342,6 @@ namespace Draw {
 			height = max(8, (int)ceil((double)Term::height * (trim(boxes) == "cpu" ? 100 : height_p) / 100));
 		#endif
 			if (android_cluster_layout) {
-				// Give Android cluster layout enough rows before widening the right panel.
 				const int needed_inner_rows = 3 + (int)Shared::coreCount + (int)Cpu::android_clusters.size() * 2;
 				height = max(height, min((int)Term::height, needed_inner_rows + 2));
 			}

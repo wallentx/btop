@@ -1371,27 +1371,33 @@ namespace Cpu {
 		catch (const std::exception& e) {
 			Logger::debug("Cpu::collect() : {}", e.what());
 #ifdef __ANDROID__
-			Logger::warning("Unable to parse /proc/stat ({}). CPU usage graph will be unavailable on this device.", e.what());
-			long long approx_total = clamp(
-				(long long)round((cpu.load_avg.at(0) / max(1l, Shared::coreCount)) * 100.0),
-				0ll, 100ll
-			);
-			auto [cluster_loads, cluster_data, cluster_valid] = get_android_cluster_data();
-			android_clusters = cluster_data;
-			if (cluster_valid and not cluster_loads.empty()) {
-				approx_total = clamp(
-					(long long)round((double)std::accumulate(cluster_loads.begin(), cluster_loads.end(), 0ll) / cluster_loads.size()),
+			if constexpr (Cpu::android_fallback_mode) {
+				Logger::warning("Unable to parse /proc/stat ({}). Using Android fallback CPU metrics.", e.what());
+				long long approx_total = clamp(
+					(long long)round((cpu.load_avg.at(0) / max(1l, Shared::coreCount)) * 100.0),
 					0ll, 100ll
 				);
+				auto [cluster_loads, cluster_data, cluster_valid] = get_android_cluster_data();
+				android_clusters = cluster_data;
+				if (cluster_valid and not cluster_loads.empty()) {
+					approx_total = clamp(
+						(long long)round((double)std::accumulate(cluster_loads.begin(), cluster_loads.end(), 0ll) / cluster_loads.size()),
+						0ll, 100ll
+					);
+				}
+				cpu.cpu_percent.at("total").push_back(approx_total);
+				while (cmp_greater(cpu.cpu_percent.at("total").size(), width * 2)) cpu.cpu_percent.at("total").pop_front();
+				for (size_t core_i = 0; core_i < cpu.core_percent.size(); core_i++) {
+					long long core_pct = (cluster_valid and cmp_less(core_i, cluster_loads.size()))
+						? cluster_loads.at(core_i)
+						: 0;
+					cpu.core_percent.at(core_i).push_back(core_pct);
+					if (cpu.core_percent.at(core_i).size() > 40) cpu.core_percent.at(core_i).pop_front();
+				}
 			}
-			cpu.cpu_percent.at("total").push_back(approx_total);
-			while (cmp_greater(cpu.cpu_percent.at("total").size(), width * 2)) cpu.cpu_percent.at("total").pop_front();
-			for (size_t core_i = 0; core_i < cpu.core_percent.size(); core_i++) {
-				long long core_pct = (cluster_valid and cmp_less(core_i, cluster_loads.size()))
-					? cluster_loads.at(core_i)
-					: 0;
-				cpu.core_percent.at(core_i).push_back(core_pct);
-				if (cpu.core_percent.at(core_i).size() > 40) cpu.core_percent.at(core_i).pop_front();
+			else {
+				if (cread.bad()) throw std::runtime_error("Failed to read /proc/stat");
+				else throw std::runtime_error(fmt::format("Cpu::collect() : {}", e.what()));
 			}
 #else
 			if (cread.bad()) throw std::runtime_error("Failed to read /proc/stat");
@@ -2354,65 +2360,66 @@ namespace Mem {
 		//? Get disks stats
 		if (show_disks) {
 #ifdef __ANDROID__
-			auto& disks = mem.disks;
-			disks.clear();
-			mem.disks_order.clear();
-			disk_ios = 0;
-			auto free_priv_android = Config::getB("disk_free_priv");
-			vector<string> mounts = {"/"};
-			if (const char* home = getenv("HOME"); home != nullptr and *home != '\0') mounts.emplace_back(home);
-			if (const char* prefix = getenv("PREFIX"); prefix != nullptr and *prefix != '\0') mounts.emplace_back(prefix);
-			for (const auto& p : {"/sdcard", "/storage/emulated/0"}) mounts.emplace_back(p);
+			if constexpr (Cpu::android_fallback_mode) {
+				auto& disks = mem.disks;
+				disks.clear();
+				mem.disks_order.clear();
+				disk_ios = 0;
+				auto free_priv_android = Config::getB("disk_free_priv");
+				vector<string> mounts = {"/"};
+				if (const char* home = getenv("HOME"); home != nullptr and *home != '\0') mounts.emplace_back(home);
+				if (const char* prefix = getenv("PREFIX"); prefix != nullptr and *prefix != '\0') mounts.emplace_back(prefix);
+				for (const auto& p : {"/sdcard", "/storage/emulated/0"}) mounts.emplace_back(p);
 
-			vector<string> uniq_mounts;
-			uniq_mounts.reserve(mounts.size());
-			for (const auto& mountpoint : mounts) {
-				if (v_contains(uniq_mounts, mountpoint)) continue;
-				std::error_code ec;
-				if (not fs::exists(mountpoint, ec)) continue;
-				uniq_mounts.push_back(mountpoint);
+				vector<string> uniq_mounts;
+				uniq_mounts.reserve(mounts.size());
+				for (const auto& mountpoint : mounts) {
+					if (v_contains(uniq_mounts, mountpoint)) continue;
+					std::error_code ec;
+					if (not fs::exists(mountpoint, ec)) continue;
+					uniq_mounts.push_back(mountpoint);
 
-				disk_info disk;
-				disk.dev = mountpoint;
-				disk.name = (mountpoint == "/" ? "root" : fs::path(mountpoint).filename().string());
-				if (disk.name.empty()) disk.name = mountpoint;
-				disk.fstype = "android";
+					disk_info disk;
+					disk.dev = mountpoint;
+					disk.name = (mountpoint == "/" ? "root" : fs::path(mountpoint).filename().string());
+					if (disk.name.empty()) disk.name = mountpoint;
+					disk.fstype = "android";
 
-				struct statvfs vfs {};
-				if (statvfs(mountpoint.c_str(), &vfs) == 0) {
-					disk.total = vfs.f_blocks * vfs.f_frsize;
-					disk.free = (free_priv_android ? vfs.f_bfree : vfs.f_bavail) * vfs.f_frsize;
-					disk.used = disk.total - disk.free;
-					if (disk.total > 0) {
-						disk.used_percent = round((double)disk.used * 100 / disk.total);
-						disk.free_percent = 100 - disk.used_percent;
+					struct statvfs vfs {};
+					if (statvfs(mountpoint.c_str(), &vfs) == 0) {
+						disk.total = vfs.f_blocks * vfs.f_frsize;
+						disk.free = (free_priv_android ? vfs.f_bfree : vfs.f_bavail) * vfs.f_frsize;
+						disk.used = disk.total - disk.free;
+						if (disk.total > 0) {
+							disk.used_percent = round((double)disk.used * 100 / disk.total);
+							disk.free_percent = 100 - disk.used_percent;
+						}
 					}
+
+					disk.io_read.push_back(0);
+					disk.io_write.push_back(0);
+					disk.io_activity.push_back(0);
+					disks[mountpoint] = std::move(disk);
+					mem.disks_order.push_back(mountpoint);
 				}
 
-				// Keep disk graphs valid without touching restricted kernel counters.
-				disk.io_read.push_back(0);
-				disk.io_write.push_back(0);
-				disk.io_activity.push_back(0);
-				disks[mountpoint] = std::move(disk);
-				mem.disks_order.push_back(mountpoint);
-			}
+				if (swap_disk and has_swap) {
+					mem.disks_order.push_back("swap");
+					disks["swap"] = {"", "swap", "swap"};
+					disks.at("swap").total = mem.stats.at("swap_total");
+					disks.at("swap").used = mem.stats.at("swap_used");
+					disks.at("swap").free = mem.stats.at("swap_free");
+					disks.at("swap").used_percent = mem.percent.at("swap_used").back();
+					disks.at("swap").free_percent = mem.percent.at("swap_free").back();
+					disks.at("swap").io_read.push_back(0);
+					disks.at("swap").io_write.push_back(0);
+					disks.at("swap").io_activity.push_back(0);
+				}
 
-			if (swap_disk and has_swap) {
-				mem.disks_order.push_back("swap");
-				disks["swap"] = {"", "swap", "swap"};
-				disks.at("swap").total = mem.stats.at("swap_total");
-				disks.at("swap").used = mem.stats.at("swap_used");
-				disks.at("swap").free = mem.stats.at("swap_free");
-				disks.at("swap").used_percent = mem.percent.at("swap_used").back();
-				disks.at("swap").free_percent = mem.percent.at("swap_free").back();
-				disks.at("swap").io_read.push_back(0);
-				disks.at("swap").io_write.push_back(0);
-				disks.at("swap").io_activity.push_back(0);
+				last_found = mem.disks_order;
+				old_uptime = system_uptime();
+				return mem;
 			}
-
-			last_found = mem.disks_order;
-			old_uptime = system_uptime();
-			return mem;
 #endif
 			static vector<string> ignore_list;
 			double uptime = system_uptime();
@@ -3065,37 +3072,39 @@ namespace Net {
 		auto new_timestamp = time_ms();
 
 #ifdef __ANDROID__
-		(void)no_update;
-		(void)net_sync;
-		(void)net_auto;
-		(void)new_timestamp;
+		if constexpr (Cpu::android_fallback_mode) {
+			(void)no_update;
+			(void)net_sync;
+			(void)net_auto;
+			(void)new_timestamp;
 
-		interfaces.clear();
-		auto sys_ifaces = read_sys_net_ifaces();
-		for (const auto& iface : sys_ifaces) {
-			if (not keep_android_iface(iface)) continue;
-			interfaces.push_back(iface);
-		}
-		if (interfaces.empty()) return empty_net;
-
-		for (const auto& iface : interfaces) {
-			auto& netif = net[iface];
-			netif.connected = true;
-			if (netif.ipv4.empty() and netif.ipv6.empty())
-				netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
-			for (const auto& dir : {"download", "upload"}) {
-				netif.stat.at(dir).speed = 0;
-				netif.bandwidth.at(dir).push_back(0);
-				while (cmp_greater(netif.bandwidth.at(dir).size(), width * 2)) netif.bandwidth.at(dir).pop_front();
+			interfaces.clear();
+			auto sys_ifaces = read_sys_net_ifaces();
+			for (const auto& iface : sys_ifaces) {
+				if (not keep_android_iface(iface)) continue;
+				interfaces.push_back(iface);
 			}
-		}
+			if (interfaces.empty()) return empty_net;
 
-		if (selected_iface.empty() or not v_contains(interfaces, selected_iface)) {
-			if (not config_iface.empty() and v_contains(interfaces, config_iface)) selected_iface = config_iface;
-			else selected_iface = interfaces.front();
-			redraw = true;
+			for (const auto& iface : interfaces) {
+				auto& netif = net[iface];
+				netif.connected = true;
+				if (netif.ipv4.empty() and netif.ipv6.empty())
+					netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
+				for (const auto& dir : {"download", "upload"}) {
+					netif.stat.at(dir).speed = 0;
+					netif.bandwidth.at(dir).push_back(0);
+					while (cmp_greater(netif.bandwidth.at(dir).size(), width * 2)) netif.bandwidth.at(dir).pop_front();
+				}
+			}
+
+			if (selected_iface.empty() or not v_contains(interfaces, selected_iface)) {
+				if (not config_iface.empty() and v_contains(interfaces, config_iface)) selected_iface = config_iface;
+				else selected_iface = interfaces.front();
+				redraw = true;
+			}
+			return net.at(selected_iface);
 		}
-		return net.at(selected_iface);
 #endif
 
 		if (not no_update) {
@@ -3763,13 +3772,19 @@ namespace Proc {
 
 				//? Process cpu usage since last update
 #ifdef __ANDROID__
-				if (proc_elapsed_s > 0.0) {
-					double cpu_pct = ((double)(cpu_t - new_proc.cpu_t) / (Shared::clkTck * proc_elapsed_s)) * 100.0;
-					if (not per_core) cpu_pct /= Shared::coreCount;
-					const double cpu_max = (per_core ? 100.0 * Shared::coreCount : 100.0);
-					new_proc.cpu_p = clamp(round(cpu_pct * 10.0) / 10.0, 0.0, cpu_max);
+				if constexpr (Cpu::android_fallback_mode) {
+					if (proc_elapsed_s > 0.0) {
+						double cpu_pct = ((double)(cpu_t - new_proc.cpu_t) / (Shared::clkTck * proc_elapsed_s)) * 100.0;
+						if (not per_core) cpu_pct /= Shared::coreCount;
+						const double cpu_max = (per_core ? 100.0 * Shared::coreCount : 100.0);
+						new_proc.cpu_p = clamp(round(cpu_pct * 10.0) / 10.0, 0.0, cpu_max);
+					}
+					else new_proc.cpu_p = 0.0;
 				}
-				else new_proc.cpu_p = 0.0;
+				else {
+					const int cmult = (per_core) ? Shared::coreCount : 1;
+					new_proc.cpu_p = clamp(round(cmult * 1000 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * Shared::coreCount);
+				}
 #else
 				const int cmult = (per_core) ? Shared::coreCount : 1;
 				new_proc.cpu_p = clamp(round(cmult * 1000 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * Shared::coreCount);

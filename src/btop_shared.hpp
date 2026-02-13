@@ -202,6 +202,11 @@ namespace Cpu {
 	extern vector<string> available_sensors;
 	extern tuple<int, float, long, string> current_bat;
 	extern std::optional<std::string> container_engine;
+	#ifdef __ANDROID__
+	inline constexpr bool android_fallback_mode = true;
+	#else
+	inline constexpr bool android_fallback_mode = false;
+	#endif
 	struct cluster_info {
 		string name;
 		string freq;

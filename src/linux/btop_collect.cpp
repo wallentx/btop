@@ -2900,19 +2900,10 @@ namespace Net {
 		(void)new_timestamp;
 
 		interfaces.clear();
-		const auto proc_net_dev = read_proc_net_dev();
-		if (not proc_net_dev.empty()) {
-			for (const auto& [iface, ignored] : proc_net_dev) {
-				if (not keep_android_iface(iface)) continue;
-				interfaces.push_back(iface);
-			}
-		}
-		if (interfaces.empty()) {
-			auto sys_ifaces = read_sys_net_ifaces();
-			for (const auto& iface : sys_ifaces) {
-				if (not keep_android_iface(iface)) continue;
-				interfaces.push_back(iface);
-			}
+		auto sys_ifaces = read_sys_net_ifaces();
+		for (const auto& iface : sys_ifaces) {
+			if (not keep_android_iface(iface)) continue;
+			interfaces.push_back(iface);
 		}
 		if (interfaces.empty()) return empty_net;
 

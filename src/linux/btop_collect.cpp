@@ -19,6 +19,7 @@ tab-size = 4
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -1074,6 +1075,161 @@ namespace Cpu {
                std::views::join | std::ranges::to<std::vector<std::int32_t>>();
     }
 
+#ifdef __ANDROID__
+	static auto json_extract_value(const string& line, const string& key) -> string {
+		const auto key_pos = line.find(key);
+		if (key_pos == string::npos) return "";
+		const auto first = line.find('"', key_pos + key.size());
+		if (first == string::npos) return "";
+		const auto second = line.find('"', first + 1);
+		if (second == string::npos) return "";
+		return line.substr(first + 1, second - first - 1);
+	}
+
+	static auto read_android_cluster_names_from_lscpu() -> vector<pair<string, int>> {
+		vector<pair<string, int>> result;
+		FILE* pipe = popen("lscpu -J 2>/dev/null", "r");
+		if (pipe == nullptr) return result;
+
+		string model_name;
+		int cores = 0;
+		char buf[1024];
+		while (fgets(buf, sizeof(buf), pipe) != nullptr) {
+			const string line{buf};
+			if (line.find("\"field\"") != string::npos) {
+				const auto field = json_extract_value(line, "\"field\": ");
+				if (field.empty()) continue;
+				if (fgets(buf, sizeof(buf), pipe) == nullptr) break;
+				const string data_line{buf};
+				const auto data = json_extract_value(data_line, "\"data\": ");
+				if (field == "Model name:") model_name = data;
+				else if (field == "Core(s) per socket:") {
+					try { cores = std::stoi(data); } catch (...) { cores = 0; }
+				}
+				else if (field == "CPU(s) scaling MHz:" and not model_name.empty()) {
+					result.emplace_back(model_name, cores);
+				}
+			}
+		}
+		pclose(pipe);
+		return result;
+	}
+
+	static auto parse_cpu_list(string cpu_list) -> vector<int> {
+		vector<int> cpus;
+		std::replace(cpu_list.begin(), cpu_list.end(), ',', ' ');
+		for (const auto& token : ssplit(cpu_list)) {
+			if (token.empty()) continue;
+			if (const auto dash = token.find('-'); dash != string::npos) {
+				try {
+					const int start = std::stoi(token.substr(0, dash));
+					const int end = std::stoi(token.substr(dash + 1));
+					for (int cpu = start; cpu <= end; cpu++) cpus.push_back(cpu);
+				}
+				catch (...) {}
+			}
+			else {
+				try { cpus.push_back(std::stoi(token)); }
+				catch (...) {}
+			}
+		}
+		return cpus;
+	}
+
+	static auto read_android_cpu_model_names() -> std::unordered_map<int, string> {
+		std::unordered_map<int, string> names;
+		ifstream cpuinfo(Shared::procPath / "cpuinfo");
+		if (not cpuinfo.good()) return names;
+		int cpu_id = -1;
+		for (string line; getline(cpuinfo, line); ) {
+			if (line.starts_with("processor")) {
+				if (const auto pos = line.find(':'); pos != string::npos) {
+					try { cpu_id = std::stoi(string(trim(line.substr(pos + 1)))); } catch (...) { cpu_id = -1; }
+				}
+			}
+			else if (line.starts_with("model name") and cpu_id >= 0) {
+				if (const auto pos = line.find(':'); pos != string::npos) {
+					names[cpu_id] = trim(line.substr(pos + 1));
+				}
+			}
+		}
+		return names;
+	}
+
+	static auto get_android_cluster_data() -> std::tuple<vector<long long>, vector<cluster_info>, bool> {
+		vector<long long> core_loads(max(1l, Shared::coreCount), 0);
+		vector<cluster_info> clusters;
+		bool got_data = false;
+		std::error_code ec;
+		const fs::path cpufreq_root = "/sys/devices/system/cpu/cpufreq";
+		if (not fs::is_directory(cpufreq_root, ec)) return {core_loads, clusters, false};
+		const auto cpu_names = read_android_cpu_model_names();
+		static const auto lscpu_cluster_names = read_android_cluster_names_from_lscpu();
+
+		for (const auto& entry : fs::directory_iterator(cpufreq_root, ec)) {
+			if (ec) break;
+			if (not entry.is_directory(ec)) continue;
+			const auto name = entry.path().filename().string();
+			if (not name.starts_with("policy")) continue;
+
+			const string affected = readfile(entry.path() / "affected_cpus");
+			const auto cpus = parse_cpu_list(affected);
+			if (cpus.empty()) continue;
+
+			double cur_freq = 0.0, max_freq = 0.0;
+			try { cur_freq = stod(readfile(entry.path() / "scaling_cur_freq", "0")); } catch (...) {}
+			try { max_freq = stod(readfile(entry.path() / "scaling_max_freq", "0")); } catch (...) {}
+			if (max_freq <= 0.0) continue;
+
+			const auto pct = clamp((long long)round((cur_freq / max_freq) * 100.0), 0ll, 100ll);
+			got_data = true;
+			cluster_info cluster{};
+			cluster.cores = cpus;
+			rng::sort(cluster.cores);
+			cluster.freq = normalize_frequency(cur_freq / 1000.0);
+			if (const auto it = cpu_names.find(cluster.cores.front()); it != cpu_names.end() and not it->second.empty()) {
+				cluster.name = it->second;
+			}
+			else {
+				cluster.name = "Cluster " + to_string(cluster.cores.front());
+			}
+
+			for (const int cpu : cpus) {
+				if (cpu >= 0 and cmp_less((size_t)cpu, core_loads.size())) core_loads.at(cpu) = pct;
+			}
+			clusters.push_back(std::move(cluster));
+		}
+
+		rng::sort(clusters, [](const auto& a, const auto& b) {
+			return a.cores.empty() ? false : b.cores.empty() ? true : a.cores.front() < b.cores.front();
+		});
+
+		if (not lscpu_cluster_names.empty()) {
+			vector<bool> used(lscpu_cluster_names.size(), false);
+			for (auto& cluster : clusters) {
+				int pick = -1;
+				for (size_t i = 0; i < lscpu_cluster_names.size(); i++) {
+					if (used.at(i)) continue;
+					if (lscpu_cluster_names.at(i).second > 0 and lscpu_cluster_names.at(i).second == (int)cluster.cores.size()) {
+						pick = (int)i;
+						break;
+					}
+				}
+				if (pick < 0) {
+					for (size_t i = 0; i < lscpu_cluster_names.size(); i++) {
+						if (not used.at(i)) { pick = (int)i; break; }
+					}
+				}
+				if (pick >= 0) {
+					cluster.name = lscpu_cluster_names.at(pick).first;
+					used.at((size_t)pick) = true;
+				}
+			}
+		}
+		return {core_loads, clusters, got_data};
+	}
+#endif
+
 	auto collect(bool no_update) -> cpu_info& {
 		if (Runner::stopping or (no_update and not current_cpu.cpu_percent.at("total").empty())) return current_cpu;
 		auto& cpu = current_cpu;
@@ -1216,10 +1372,25 @@ namespace Cpu {
 			Logger::debug("Cpu::collect() : {}", e.what());
 #ifdef __ANDROID__
 			Logger::warning("Unable to parse /proc/stat ({}). CPU usage graph will be unavailable on this device.", e.what());
-			cpu.cpu_percent.at("total").push_back(0);
+			long long approx_total = clamp(
+				(long long)round((cpu.load_avg.at(0) / max(1l, Shared::coreCount)) * 100.0),
+				0ll, 100ll
+			);
+			auto [cluster_loads, cluster_data, cluster_valid] = get_android_cluster_data();
+			android_clusters = cluster_data;
+			if (cluster_valid and not cluster_loads.empty()) {
+				approx_total = clamp(
+					(long long)round((double)std::accumulate(cluster_loads.begin(), cluster_loads.end(), 0ll) / cluster_loads.size()),
+					0ll, 100ll
+				);
+			}
+			cpu.cpu_percent.at("total").push_back(approx_total);
 			while (cmp_greater(cpu.cpu_percent.at("total").size(), width * 2)) cpu.cpu_percent.at("total").pop_front();
 			for (size_t core_i = 0; core_i < cpu.core_percent.size(); core_i++) {
-				cpu.core_percent.at(core_i).push_back(0);
+				long long core_pct = (cluster_valid and cmp_less(core_i, cluster_loads.size()))
+					? cluster_loads.at(core_i)
+					: 0;
+				cpu.core_percent.at(core_i).push_back(core_pct);
 				if (cpu.core_percent.at(core_i).size() > 40) cpu.core_percent.at(core_i).pop_front();
 			}
 #else
@@ -3218,6 +3389,7 @@ namespace Proc {
 	uint64_t cputimes;
 	int collapse = -1, expand = -1, toggle_children = -1;
 	uint64_t old_cputimes{};
+	uint64_t old_proc_timestamp_us{};
 	atomic<int> numpids{};
 	int filter_found{};
 
@@ -3353,7 +3525,10 @@ namespace Proc {
 
 		const double uptime = system_uptime();
 
-		const int cmult = (per_core) ? Shared::coreCount : 1;
+		const uint64_t proc_timestamp_us = get_monotonicTimeUSec();
+		const double proc_elapsed_s = (old_proc_timestamp_us > 0 and proc_timestamp_us > old_proc_timestamp_us)
+			? (double)(proc_timestamp_us - old_proc_timestamp_us) / 1000000.0
+			: 0.0;
 		bool got_detailed = false;
 
 		static size_t proc_clear_count{};
@@ -3587,7 +3762,18 @@ namespace Proc {
 				}
 
 				//? Process cpu usage since last update
+#ifdef __ANDROID__
+				if (proc_elapsed_s > 0.0) {
+					double cpu_pct = ((double)(cpu_t - new_proc.cpu_t) / (Shared::clkTck * proc_elapsed_s)) * 100.0;
+					if (not per_core) cpu_pct /= Shared::coreCount;
+					const double cpu_max = (per_core ? 100.0 * Shared::coreCount : 100.0);
+					new_proc.cpu_p = clamp(round(cpu_pct * 10.0) / 10.0, 0.0, cpu_max);
+				}
+				else new_proc.cpu_p = 0.0;
+#else
+				const int cmult = (per_core) ? Shared::coreCount : 1;
 				new_proc.cpu_p = clamp(round(cmult * 1000 * (cpu_t - new_proc.cpu_t) / max((uint64_t)1, cputimes - old_cputimes)) / 10.0, 0.0, 100.0 * Shared::coreCount);
+#endif
 
 				//? Process cumulative cpu usage since process start
 				new_proc.cpu_c = (double)cpu_t / max(1.0, (uptime * Shared::clkTck) - new_proc.cpu_s);
@@ -3633,6 +3819,7 @@ namespace Proc {
 			}
 
 			old_cputimes = cputimes;
+			old_proc_timestamp_us = proc_timestamp_us;
 		}
 		//* ---------------------------------------------Collection done-----------------------------------------------
 

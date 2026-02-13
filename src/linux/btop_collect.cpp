@@ -274,6 +274,26 @@ namespace Gpu {
 
 namespace Mem {
 	double old_uptime;
+	static auto is_android_user_mount(const string& mountpoint) -> bool {
+#ifdef __ANDROID__
+		if (mountpoint == "/") return true;
+		if (mountpoint.starts_with("/sdcard")) return true;
+		if (mountpoint.starts_with("/storage")) return true;
+		if (mountpoint.starts_with("/data")) return true;
+		if (mountpoint.starts_with("/mnt/shared")) return true;
+		if (mountpoint.starts_with("/mnt/runtime/default/emulated")) return true;
+		if (const char* home = getenv("HOME"); home != nullptr and *home != '\0') {
+			if (mountpoint.starts_with(home)) return true;
+		}
+		if (const char* prefix = getenv("PREFIX"); prefix != nullptr and *prefix != '\0') {
+			if (mountpoint.starts_with(prefix)) return true;
+		}
+		return false;
+#else
+		(void)mountpoint;
+		return true;
+#endif
+	}
 }
 
 namespace Shared {
@@ -2162,6 +2182,67 @@ namespace Mem {
 
 		//? Get disks stats
 		if (show_disks) {
+#ifdef __ANDROID__
+			auto& disks = mem.disks;
+			disks.clear();
+			mem.disks_order.clear();
+			disk_ios = 0;
+			auto free_priv_android = Config::getB("disk_free_priv");
+			vector<string> mounts = {"/"};
+			if (const char* home = getenv("HOME"); home != nullptr and *home != '\0') mounts.emplace_back(home);
+			if (const char* prefix = getenv("PREFIX"); prefix != nullptr and *prefix != '\0') mounts.emplace_back(prefix);
+			for (const auto& p : {"/sdcard", "/storage/emulated/0"}) mounts.emplace_back(p);
+
+			vector<string> uniq_mounts;
+			uniq_mounts.reserve(mounts.size());
+			for (const auto& mountpoint : mounts) {
+				if (v_contains(uniq_mounts, mountpoint)) continue;
+				std::error_code ec;
+				if (not fs::exists(mountpoint, ec)) continue;
+				uniq_mounts.push_back(mountpoint);
+
+				disk_info disk;
+				disk.dev = mountpoint;
+				disk.name = (mountpoint == "/" ? "root" : fs::path(mountpoint).filename().string());
+				if (disk.name.empty()) disk.name = mountpoint;
+				disk.fstype = "android";
+
+				struct statvfs vfs {};
+				if (statvfs(mountpoint.c_str(), &vfs) == 0) {
+					disk.total = vfs.f_blocks * vfs.f_frsize;
+					disk.free = (free_priv_android ? vfs.f_bfree : vfs.f_bavail) * vfs.f_frsize;
+					disk.used = disk.total - disk.free;
+					if (disk.total > 0) {
+						disk.used_percent = round((double)disk.used * 100 / disk.total);
+						disk.free_percent = 100 - disk.used_percent;
+					}
+				}
+
+				// Keep disk graphs valid without touching restricted kernel counters.
+				disk.io_read.push_back(0);
+				disk.io_write.push_back(0);
+				disk.io_activity.push_back(0);
+				disks[mountpoint] = std::move(disk);
+				mem.disks_order.push_back(mountpoint);
+			}
+
+			if (swap_disk and has_swap) {
+				mem.disks_order.push_back("swap");
+				disks["swap"] = {"", "swap", "swap"};
+				disks.at("swap").total = mem.stats.at("swap_total");
+				disks.at("swap").used = mem.stats.at("swap_used");
+				disks.at("swap").free = mem.stats.at("swap_free");
+				disks.at("swap").used_percent = mem.percent.at("swap_used").back();
+				disks.at("swap").free_percent = mem.percent.at("swap_free").back();
+				disks.at("swap").io_read.push_back(0);
+				disks.at("swap").io_write.push_back(0);
+				disks.at("swap").io_activity.push_back(0);
+			}
+
+			last_found = mem.disks_order;
+			old_uptime = system_uptime();
+			return mem;
+#endif
 			static vector<string> ignore_list;
 			double uptime = system_uptime();
 			auto free_priv = Config::getB("disk_free_priv");
@@ -2170,10 +2251,59 @@ namespace Mem {
 				bool filter_exclude = false;
 				auto use_fstab = Config::getB("use_fstab");
 				auto only_physical = Config::getB("only_physical");
+#ifdef __ANDROID__
+				constinit static bool warned_use_fstab = false;
+				if (use_fstab) {
+					use_fstab = false;
+					if (not warned_use_fstab) {
+						Logger::warning("Disabling use_fstab on Android.");
+						warned_use_fstab = true;
+					}
+				}
+				constinit static bool warned_only_physical = false;
+				if (only_physical and not use_fstab) {
+					only_physical = false;
+					if (not warned_only_physical) {
+						Logger::warning("Disabling only_physical on Android to include emulated storage volumes.");
+						warned_only_physical = true;
+					}
+				}
+#endif
 				auto zfs_hide_datasets = Config::getB("zfs_hide_datasets");
 				auto& disks = mem.disks;
 				static std::unordered_map<string, future<pair<disk_info, int>>> disks_stats_promises;
 				ifstream diskread;
+				auto add_android_fallback_mounts = [&](vector<string>& found) {
+#ifdef __ANDROID__
+					vector<string> fallback_mounts = {"/"};
+					if (const char* home = getenv("HOME"); home != nullptr and *home != '\0') fallback_mounts.emplace_back(home);
+					if (const char* prefix = getenv("PREFIX"); prefix != nullptr and *prefix != '\0') fallback_mounts.emplace_back(prefix);
+					for (const auto& p : {"/sdcard", "/storage", "/storage/emulated", "/storage/emulated/0", "/mnt/shared", "/mnt/runtime/default/emulated/0"}) {
+						fallback_mounts.emplace_back(p);
+					}
+					std::error_code storage_ec;
+					if (fs::is_directory("/storage", storage_ec)) {
+						for (const auto& entry : fs::directory_iterator("/storage", storage_ec)) {
+							if (storage_ec) break;
+							if (entry.is_directory(storage_ec)) fallback_mounts.push_back(entry.path().string());
+						}
+					}
+
+					for (const auto& mountpoint : fallback_mounts) {
+						std::error_code ec;
+						if (not fs::exists(mountpoint, ec)) continue;
+						if (v_contains(found, mountpoint)) continue;
+						found.push_back(mountpoint);
+						if (not v_contains(last_found, mountpoint)) redraw = true;
+						if (not disks.contains(mountpoint)) {
+							disks[mountpoint] = disk_info{mountpoint, fs::path(mountpoint).filename(), "android"};
+							if (disks.at(mountpoint).name.empty()) disks.at(mountpoint).name = (mountpoint == "/" ? "root" : mountpoint);
+						}
+					}
+#else
+					(void)found;
+#endif
+				};
 
 				vector<string> filter;
 				if (not disks_filter.empty()) {
@@ -2202,31 +2332,69 @@ namespace Mem {
 				}
 
 				//? Get disk list to use from fstab if enabled
-				if (use_fstab and fs::last_write_time("/etc/fstab") != fstab_time) {
-					fstab.clear();
-					fstab_time = fs::last_write_time("/etc/fstab");
-					diskread.open("/etc/fstab");
-					if (diskread.good()) {
-						for (string instr; diskread >> instr;) {
-							if (not instr.starts_with('#')) {
-								diskread >> instr;
-								#ifdef SNAPPED
-									if (instr == "/") fstab.push_back("/mnt");
-									else if (not is_in(instr, "none", "swap")) fstab.push_back(instr);
-								#else
-									if (not is_in(instr, "none", "swap")) fstab.push_back(instr);
-								#endif
+				if (use_fstab) {
+					std::error_code fstab_ec;
+					const fs::path fstab_path = "/etc/fstab";
+					if (not fs::exists(fstab_path, fstab_ec)) {
+#ifdef __ANDROID__
+						use_fstab = false;
+						Logger::warning("/etc/fstab not found, disabling use_fstab on Android.");
+#endif
+					}
+					else {
+						const auto new_fstab_time = fs::last_write_time(fstab_path, fstab_ec);
+						if (fstab_ec) {
+#ifdef __ANDROID__
+							use_fstab = false;
+							Logger::warning("Failed to stat /etc/fstab, disabling use_fstab on Android.");
+#else
+							throw std::runtime_error("Failed to stat /etc/fstab");
+#endif
+						}
+						else if (new_fstab_time != fstab_time) {
+							fstab.clear();
+							fstab_time = new_fstab_time;
+							diskread.open(fstab_path);
+							if (diskread.good()) {
+								for (string instr; diskread >> instr;) {
+									if (not instr.starts_with('#')) {
+										diskread >> instr;
+										#ifdef SNAPPED
+											if (instr == "/") fstab.push_back("/mnt");
+											else if (not is_in(instr, "none", "swap")) fstab.push_back(instr);
+										#else
+											if (not is_in(instr, "none", "swap")) fstab.push_back(instr);
+										#endif
+									}
+									diskread.ignore(SSmax, '\n');
+								}
 							}
-							diskread.ignore(SSmax, '\n');
+							else {
+#ifdef __ANDROID__
+								use_fstab = false;
+								Logger::warning("Failed to read /etc/fstab, disabling use_fstab on Android.");
+#else
+								throw std::runtime_error("Failed to read /etc/fstab");
+#endif
+							}
+							diskread.close();
 						}
 					}
-					else
-						throw std::runtime_error("Failed to read /etc/fstab");
-					diskread.close();
 				}
 
-				//? Get mounts from /etc/mtab or /proc/self/mounts
-				diskread.open((fs::exists("/etc/mtab") ? fs::path("/etc/mtab") : Shared::procPath / "self/mounts"));
+				//? Get mounts from /etc/mtab, fall back to /proc/self/mounts.
+				const fs::path mtab_path = "/etc/mtab";
+				const fs::path proc_mounts_path = Shared::procPath / "self/mounts";
+				if (fs::exists(mtab_path)) {
+					diskread.open(mtab_path);
+					if (not diskread.good()) {
+						diskread.clear();
+						diskread.open(proc_mounts_path);
+					}
+				}
+				else {
+					diskread.open(proc_mounts_path);
+				}
 				if (diskread.good()) {
 					vector<string> found;
 					found.reserve(last_found.size());
@@ -2300,6 +2468,19 @@ namespace Mem {
 							}
 						}
 					}
+#ifdef __ANDROID__
+					if (found.empty()) add_android_fallback_mounts(found);
+#endif
+
+					//? Remove noisy pseudo mounts on Android.
+#ifdef __ANDROID__
+					vector<string> filtered_found;
+					filtered_found.reserve(found.size());
+					for (const auto& mountpoint : found) {
+						if (is_android_user_mount(mountpoint)) filtered_found.push_back(mountpoint);
+					}
+					found = std::move(filtered_found);
+#endif
 
 					//? Remove disks no longer mounted or filtered out
 					if (swap_disk and has_swap) found.push_back("swap");
@@ -2312,8 +2493,25 @@ namespace Mem {
 					if (found.size() != last_found.size()) redraw = true;
 					last_found = std::move(found);
 				}
-				else
+				else {
+#ifdef __ANDROID__
+					Logger::warning("Failed to read /etc/mtab and /proc/self/mounts, using Android fallback mountpoints.");
+					vector<string> found;
+					add_android_fallback_mounts(found);
+
+					if (swap_disk and has_swap) found.push_back("swap");
+					for (auto it = disks.begin(); it != disks.end();) {
+						if (not v_contains(found, it->first))
+							it = disks.erase(it);
+						else
+							it++;
+					}
+					if (found.size() != last_found.size()) redraw = true;
+					last_found = std::move(found);
+#else
 					throw std::runtime_error("Failed to get mounts from /etc/mtab and /proc/self/mounts");
+#endif
+				}
 				diskread.close();
 
 				//? Get disk/partition stats
@@ -2332,10 +2530,16 @@ namespace Mem {
 						}
 						auto promise_res = promises_it->second.get();
 						if(promise_res.second != -1){
+#ifdef __ANDROID__
+							Logger::warning("Failed to statvfs mount \"{}\" with errno {}. Keeping mount with unknown size on Android.", mountpoint, promise_res.second);
+							++it;
+							continue;
+#else
 							ignore_list.push_back(mountpoint);
 							Logger::warning("Failed to get disk/partition stats for mount \"{}\" with statvfs error code: {}. Ignoring...", mountpoint, promise_res.second);
 							it = disks.erase(it);
 							continue;
+#endif
 						}
 						auto &updated_stats = promise_res.first;
 						disk.total = updated_stats.total;
@@ -2392,7 +2596,15 @@ namespace Mem {
 				int64_t sectors_read, sectors_write, io_ticks, io_ticks_temp;
 				disk_ios = 0;
 				for (auto& [ignored, disk] : disks) {
-					if (disk.stat.empty() or access(disk.stat.c_str(), R_OK) != 0) continue;
+					if (disk.stat.empty() or access(disk.stat.c_str(), R_OK) != 0) {
+						disk.io_read.push_back(0);
+						disk.io_write.push_back(0);
+						disk.io_activity.push_back(0);
+						while (cmp_greater(disk.io_read.size(), width * 2)) disk.io_read.pop_front();
+						while (cmp_greater(disk.io_write.size(), width * 2)) disk.io_write.pop_front();
+						while (cmp_greater(disk.io_activity.size(), width * 2)) disk.io_activity.pop_front();
+						continue;
+					}
 					if (disk.fstype == "zfs" && zfs_hide_datasets && zfs_collect_pool_total_stats(disk)) {
 						disk_ios++;
 						continue;
@@ -2627,6 +2839,52 @@ namespace Net {
 	bool rescale{true};
 	uint64_t timestamp{};
 
+	static auto read_proc_net_dev() -> std::unordered_map<string, std::array<uint64_t, 2>> {
+		std::unordered_map<string, std::array<uint64_t, 2>> counters;
+		ifstream devread(Shared::procPath / "net/dev");
+		if (not devread.good()) return counters;
+
+		string line;
+		int line_i = 0;
+		while (getline(devread, line)) {
+			// Skip header lines.
+			if (++line_i <= 2) continue;
+			if (line.empty()) continue;
+
+			std::replace(line.begin(), line.end(), ':', ' ');
+			const auto fields = ssplit(line);
+			// iface + 8 RX fields + 8 TX fields => at least 17 fields.
+			if (fields.size() < 17) continue;
+
+			try {
+				counters[fields.at(0)] = {stoull(fields.at(1)), stoull(fields.at(9))};
+			}
+			catch (...) {}
+		}
+		return counters;
+	}
+
+	static auto read_sys_net_ifaces() -> vector<string> {
+		vector<string> names;
+		std::error_code ec;
+		const fs::path net_class{"/sys/class/net"};
+		if (not fs::is_directory(net_class, ec)) return names;
+		for (const auto& entry : fs::directory_iterator(net_class, ec)) {
+			if (ec) break;
+			const auto name = entry.path().filename().string();
+			if (not name.empty()) names.push_back(name);
+		}
+		return names;
+	}
+	static auto keep_android_iface(const string& iface) -> bool {
+#ifdef __ANDROID__
+		return iface == "lo" or iface.starts_with("wlan") or iface.starts_with("rmnet") or iface.starts_with("v4-rmnet") or iface.starts_with("v6-rmnet");
+#else
+		(void)iface;
+		return true;
+#endif
+	}
+
 	auto collect(bool no_update) -> net_info& {
 		if (Runner::stopping) return empty_net;
 		auto& net = current_net;
@@ -2635,112 +2893,242 @@ namespace Net {
 		auto net_auto = Config::getB("net_auto");
 		auto new_timestamp = time_ms();
 
-		if (not no_update and errors < 3) {
+#ifdef __ANDROID__
+		(void)no_update;
+		(void)net_sync;
+		(void)net_auto;
+		(void)new_timestamp;
+
+		interfaces.clear();
+		const auto proc_net_dev = read_proc_net_dev();
+		if (not proc_net_dev.empty()) {
+			for (const auto& [iface, ignored] : proc_net_dev) {
+				if (not keep_android_iface(iface)) continue;
+				interfaces.push_back(iface);
+			}
+		}
+		if (interfaces.empty()) {
+			auto sys_ifaces = read_sys_net_ifaces();
+			for (const auto& iface : sys_ifaces) {
+				if (not keep_android_iface(iface)) continue;
+				interfaces.push_back(iface);
+			}
+		}
+		if (interfaces.empty()) return empty_net;
+
+		for (const auto& iface : interfaces) {
+			auto& netif = net[iface];
+			netif.connected = true;
+			if (netif.ipv4.empty() and netif.ipv6.empty())
+				netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
+			for (const auto& dir : {"download", "upload"}) {
+				netif.stat.at(dir).speed = 0;
+				netif.bandwidth.at(dir).push_back(0);
+				while (cmp_greater(netif.bandwidth.at(dir).size(), width * 2)) netif.bandwidth.at(dir).pop_front();
+			}
+		}
+
+		if (selected_iface.empty() or not v_contains(interfaces, selected_iface)) {
+			if (not config_iface.empty() and v_contains(interfaces, config_iface)) selected_iface = config_iface;
+			else selected_iface = interfaces.front();
+			redraw = true;
+		}
+		return net.at(selected_iface);
+#endif
+
+		if (not no_update) {
+			const auto proc_net_dev = read_proc_net_dev();
 			//? Get interface list using getifaddrs() wrapper
 			IfAddrsPtr if_addrs {};
 			if (if_addrs.get_status() != 0) {
-				errors++;
-				Logger::error("Net::collect() -> getifaddrs() failed with id {}", if_addrs.get_status());
-				redraw = true;
-				return empty_net;
+				if (proc_net_dev.empty()) {
+					Logger::warning("Net::collect() -> getifaddrs() failed with id {} and /proc/net/dev unavailable, showing interface names only.", if_addrs.get_status());
+					interfaces = read_sys_net_ifaces();
+					for (const auto& iface : interfaces) {
+						auto& netif = net[iface];
+						netif.connected = true;
+						if (netif.ipv4.empty() and netif.ipv6.empty())
+							netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
+						for (const auto& dir : {"download", "upload"}) {
+							netif.stat.at(dir).speed = 0;
+							netif.bandwidth.at(dir).push_back(0);
+							while (cmp_greater(netif.bandwidth.at(dir).size(), width * 2)) netif.bandwidth.at(dir).pop_front();
+						}
+					}
+					timestamp = new_timestamp;
+					errors = 0;
+					redraw = true;
+				}
+				else {
+					Logger::warning("Net::collect() -> getifaddrs() failed with id {}, using /proc/net/dev fallback.", if_addrs.get_status());
+					interfaces.clear();
+					for (const auto& [iface, counters] : proc_net_dev) {
+						if (not keep_android_iface(iface)) continue;
+						interfaces.push_back(iface);
+						auto& netif = net[iface];
+						netif.connected = true;
+						if (netif.ipv4.empty() and netif.ipv6.empty())
+							netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
+
+						for (const auto& dir : {"download", "upload"}) {
+							const uint64_t val = (string(dir) == "download" ? counters.at(0) : counters.at(1));
+							auto& saved_stat = netif.stat.at(dir);
+							auto& bandwidth = netif.bandwidth.at(dir);
+							if (val < saved_stat.last) {
+								saved_stat.rollover += saved_stat.last;
+								saved_stat.last = 0;
+							}
+							if (cmp_greater((unsigned long long)saved_stat.rollover + (unsigned long long)val, numeric_limits<uint64_t>::max())) {
+								saved_stat.rollover = 0;
+								saved_stat.last = 0;
+							}
+							if (timestamp != 0 and new_timestamp > timestamp)
+								saved_stat.speed = round((double)(val - saved_stat.last) / ((double)(new_timestamp - timestamp) / 1000));
+							else
+								saved_stat.speed = 0;
+							if (saved_stat.speed > saved_stat.top) saved_stat.top = saved_stat.speed;
+							if (saved_stat.offset > val + saved_stat.rollover) saved_stat.offset = 0;
+							saved_stat.total = (val + saved_stat.rollover) - saved_stat.offset;
+							saved_stat.last = val;
+
+							bandwidth.push_back(saved_stat.speed);
+							while (cmp_greater(bandwidth.size(), width * 2)) bandwidth.pop_front();
+						}
+					}
+					timestamp = new_timestamp;
+					errors = 0;
+				}
 			}
-			int family = 0;
-			static_assert(INET6_ADDRSTRLEN >= INET_ADDRSTRLEN); // 46 >= 16, compile-time assurance.
-			enum { IPBUFFER_MAXSIZE = INET6_ADDRSTRLEN }; // manually using the known biggest value, guarded by the above static_assert
-			char ip[IPBUFFER_MAXSIZE];
-			interfaces.clear();
-			string ipv4, ipv6;
+			else {
+				int family = 0;
+				static_assert(INET6_ADDRSTRLEN >= INET_ADDRSTRLEN); // 46 >= 16, compile-time assurance.
+				enum { IPBUFFER_MAXSIZE = INET6_ADDRSTRLEN }; // manually using the known biggest value, guarded by the above static_assert
+				char ip[IPBUFFER_MAXSIZE];
+				interfaces.clear();
+				string ipv4, ipv6;
 
-			//? Iteration over all items in getifaddrs() list
-			for (auto* ifa = if_addrs.get(); ifa != nullptr; ifa = ifa->ifa_next) {
-				if (ifa->ifa_addr == nullptr) continue;
-				family = ifa->ifa_addr->sa_family;
-				const auto& iface = ifa->ifa_name;
+				//? Iteration over all items in getifaddrs() list
+				for (auto* ifa = if_addrs.get(); ifa != nullptr; ifa = ifa->ifa_next) {
+					if (ifa->ifa_addr == nullptr) continue;
+					family = ifa->ifa_addr->sa_family;
+					const auto& iface = ifa->ifa_name;
+					if (not keep_android_iface(iface)) continue;
 
-				//? Update available interfaces vector and get status of interface
-				if (not v_contains(interfaces, iface)) {
-					interfaces.push_back(iface);
-					net[iface].connected = (ifa->ifa_flags & IFF_RUNNING);
+					//? Update available interfaces vector and get status of interface
+					if (not v_contains(interfaces, iface)) {
+						interfaces.push_back(iface);
+						net[iface].connected = (ifa->ifa_flags & IFF_RUNNING);
 
-					// An interface can have more than one IP of the same family associated with it,
-					// but we pick only the first one to show in the NET box.
-					// Note: Interfaces without any IPv4 and IPv6 set are still valid and monitorable!
-					net[iface].ipv4.clear();
-					net[iface].ipv6.clear();
+						// An interface can have more than one IP of the same family associated with it,
+						// but we pick only the first one to show in the NET box.
+						// Note: Interfaces without any IPv4 and IPv6 set are still valid and monitorable!
+						net[iface].ipv4.clear();
+						net[iface].ipv6.clear();
+					}
+
+
+					//? Get IPv4 address
+					if (family == AF_INET) {
+						if (net[iface].ipv4.empty()) {
+							if (nullptr != inet_ntop(family, &(reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr)->sin_addr), ip, IPBUFFER_MAXSIZE)) {
+								net[iface].ipv4 = ip;
+							} else {
+								int errsv = errno;
+								Logger::error("Net::collect() -> Failed to convert IPv4 to string for iface {}, errno: {}", iface, strerror(errsv));
+							}
+						}
+					}
+					//? Get IPv6 address
+					else if (family == AF_INET6) {
+						if (net[iface].ipv6.empty()) {
+							if (nullptr != inet_ntop(family, &(reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr)->sin6_addr), ip, IPBUFFER_MAXSIZE)) {
+								net[iface].ipv6 = ip;
+							} else {
+								int errsv = errno;
+								Logger::error("Net::collect() -> Failed to convert IPv6 to string for iface {}, errno: {}", iface, strerror(errsv));
+							}
+						}
+					} //else, ignoring family==AF_PACKET (see man 3 getifaddrs) which is the first one in the `for` loop.
+				}
+				if (interfaces.empty()) {
+					if (not proc_net_dev.empty()) {
+						for (const auto& [iface, ignored] : proc_net_dev) {
+							if (keep_android_iface(iface)) interfaces.push_back(iface);
+						}
+					}
+					else {
+						interfaces = read_sys_net_ifaces();
+						interfaces.erase(std::remove_if(interfaces.begin(), interfaces.end(), [](const string& iface){ return not keep_android_iface(iface); }), interfaces.end());
+					}
+					for (const auto& iface : interfaces) {
+						auto& netif = net[iface];
+						netif.connected = true;
+						if (netif.ipv4.empty() and netif.ipv6.empty())
+							netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
+					}
 				}
 
+				//? Get total received and transmitted bytes + device address if no ip was found
+				for (const auto& iface : interfaces) {
+					auto& netif = net.at(iface);
+					if (netif.ipv4.empty() and netif.ipv6.empty())
+						netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
 
-				//? Get IPv4 address
-				if (family == AF_INET) {
-					if (net[iface].ipv4.empty()) {
-						if (nullptr != inet_ntop(family, &(reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr)->sin_addr), ip, IPBUFFER_MAXSIZE)) {
-							net[iface].ipv4 = ip;
-						} else {
-							int errsv = errno;
-							Logger::error("Net::collect() -> Failed to convert IPv4 to string for iface {}, errno: {}", iface, strerror(errsv));
+					for (const string dir : {"download", "upload"}) {
+						const fs::path sys_file = "/sys/class/net/" + iface + "/statistics/" + (dir == "download" ? "rx_bytes" : "tx_bytes");
+						auto& saved_stat = netif.stat.at(dir);
+						auto& bandwidth = netif.bandwidth.at(dir);
+
+						uint64_t val{};
+						bool got_counter = false;
+						if (access(sys_file.c_str(), R_OK) == 0) {
+							try {
+								val = stoull(readfile(sys_file, "0"));
+								got_counter = true;
+							}
+							catch (const std::invalid_argument&) {}
+							catch (const std::out_of_range&) {}
 						}
-					}
-				}
-				//? Get IPv6 address
-				else if (family == AF_INET6) {
-					if (net[iface].ipv6.empty()) {
-						if (nullptr != inet_ntop(family, &(reinterpret_cast<struct sockaddr_in6*>(ifa->ifa_addr)->sin6_addr), ip, IPBUFFER_MAXSIZE)) {
-							net[iface].ipv6 = ip;
-						} else {
-							int errsv = errno;
-							Logger::error("Net::collect() -> Failed to convert IPv6 to string for iface {}, errno: {}", iface, strerror(errsv));
+						if (not got_counter) {
+							if (const auto proc_it = proc_net_dev.find(iface); proc_it != proc_net_dev.end()) {
+								val = (dir == "download" ? proc_it->second.at(0) : proc_it->second.at(1));
+								got_counter = true;
+							}
 						}
-					}
-				} //else, ignoring family==AF_PACKET (see man 3 getifaddrs) which is the first one in the `for` loop.
-			}
+						if (not got_counter) continue;
 
-			//? Get total received and transmitted bytes + device address if no ip was found
-			for (const auto& iface : interfaces) {
-				auto& netif = net.at(iface);
-				if (netif.ipv4.empty() and netif.ipv6.empty())
-					netif.ipv4 = readfile("/sys/class/net/" + iface + "/address");
-
-				for (const string dir : {"download", "upload"}) {
-					const fs::path sys_file = "/sys/class/net/" + iface + "/statistics/" + (dir == "download" ? "rx_bytes" : "tx_bytes");
-					auto& saved_stat = netif.stat.at(dir);
-					auto& bandwidth = netif.bandwidth.at(dir);
-
-					uint64_t val{};
-					try { val = stoull(readfile(sys_file, "0")); }
-					catch (const std::invalid_argument&) {}
-					catch (const std::out_of_range&) {}
-
-					//? Update speed, total and top values
-					if (val < saved_stat.last) {
-						saved_stat.rollover += saved_stat.last;
-						saved_stat.last = 0;
-					}
-					if (cmp_greater((unsigned long long)saved_stat.rollover + (unsigned long long)val, numeric_limits<uint64_t>::max())) {
-						saved_stat.rollover = 0;
-						saved_stat.last = 0;
-					}
-					saved_stat.speed = round((double)(val - saved_stat.last) / ((double)(new_timestamp - timestamp) / 1000));
-					if (saved_stat.speed > saved_stat.top) saved_stat.top = saved_stat.speed;
-					if (saved_stat.offset > val + saved_stat.rollover) saved_stat.offset = 0;
-					saved_stat.total = (val + saved_stat.rollover) - saved_stat.offset;
-					saved_stat.last = val;
-
-					//? Add values to graph
-					bandwidth.push_back(saved_stat.speed);
-					while (cmp_greater(bandwidth.size(), width * 2)) bandwidth.pop_front();
-
-					//? Set counters for auto scaling
-					if (net_auto and selected_iface == iface) {
-						if (net_sync and saved_stat.speed < netif.stat.at(dir == "download" ? "upload" : "download").speed) continue;
-						if (saved_stat.speed > graph_max[dir]) {
-							++max_count[dir][0];
-							if (max_count[dir][1] > 0) --max_count[dir][1];
+						//? Update speed, total and top values
+						if (val < saved_stat.last) {
+							saved_stat.rollover += saved_stat.last;
+							saved_stat.last = 0;
 						}
-						else if (graph_max[dir] > 10 << 10 and saved_stat.speed < graph_max[dir] / 10) {
-							++max_count[dir][1];
-							if (max_count[dir][0] > 0) --max_count[dir][0];
+						if (cmp_greater((unsigned long long)saved_stat.rollover + (unsigned long long)val, numeric_limits<uint64_t>::max())) {
+							saved_stat.rollover = 0;
+							saved_stat.last = 0;
 						}
+						saved_stat.speed = round((double)(val - saved_stat.last) / ((double)(new_timestamp - timestamp) / 1000));
+						if (saved_stat.speed > saved_stat.top) saved_stat.top = saved_stat.speed;
+						if (saved_stat.offset > val + saved_stat.rollover) saved_stat.offset = 0;
+						saved_stat.total = (val + saved_stat.rollover) - saved_stat.offset;
+						saved_stat.last = val;
 
+						//? Add values to graph
+						bandwidth.push_back(saved_stat.speed);
+						while (cmp_greater(bandwidth.size(), width * 2)) bandwidth.pop_front();
+
+						//? Set counters for auto scaling
+						if (net_auto and selected_iface == iface) {
+							if (net_sync and saved_stat.speed < netif.stat.at(dir == "download" ? "upload" : "download").speed) continue;
+							if (saved_stat.speed > graph_max[dir]) {
+								++max_count[dir][0];
+								if (max_count[dir][1] > 0) --max_count[dir][1];
+							}
+							else if (graph_max[dir] > 10 << 10 and saved_stat.speed < graph_max[dir] / 10) {
+								++max_count[dir][1];
+								if (max_count[dir][0] > 0) --max_count[dir][0];
+							}
+
+						}
 					}
 				}
 			}
@@ -2759,6 +3147,10 @@ namespace Net {
 		}
 
 		//? Return empty net_info struct if no interfaces was found
+		if (interfaces.empty() and not net.empty()) {
+			interfaces.clear();
+			for (const auto& [iface, ignored] : net) interfaces.push_back(iface);
+		}
 		if (net.empty())
 			return empty_net;
 

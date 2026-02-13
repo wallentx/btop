@@ -327,8 +327,10 @@ namespace Net {
 		struct ifaddrs* ifaddr;
 		int status;
 	public:
-		IfAddrsPtr() { status = getifaddrs(&ifaddr); }
-		~IfAddrsPtr() noexcept { freeifaddrs(ifaddr); }
+		IfAddrsPtr() : ifaddr(nullptr), status(getifaddrs(&ifaddr)) {}
+		~IfAddrsPtr() noexcept {
+			if (status == 0 and ifaddr != nullptr) freeifaddrs(ifaddr);
+		}
 		IfAddrsPtr(const IfAddrsPtr &) = delete;
 		IfAddrsPtr& operator=(IfAddrsPtr& other) = delete;
 		IfAddrsPtr(IfAddrsPtr &&) = delete;
